@@ -129,6 +129,7 @@ func (o *orm) ClaimUnclaimedJobs(ctx context.Context) ([]Job, error) {
 		Preload("KeeperSpec").
 		Preload("PipelineSpec").
 		Preload("CronSpec").
+		Preload("WebhookSpec").
 		Find(&newlyClaimedJobs).Error
 	if err != nil {
 		return nil, errors.Wrap(err, "ClaimUnclaimedJobs failed to load jobs")
@@ -226,6 +227,12 @@ func (o *orm) CreateJob(ctx context.Context, jobSpec *Job, taskDAG pipeline.Task
 				return errors.Wrap(err, "failed to create CronSpec for jobSpec")
 			}
 			jobSpec.VRFSpecID = &jobSpec.VRFSpec.ID
+		case Webhook:
+			err := tx.Create(&jobSpec.WebhookSpec).Error
+			if err != nil {
+				return errors.Wrap(err, "failed to create WebhookSpec for jobSpec")
+			}
+			jobSpec.WebhookSpecId = &jobSpec.WebhookSpec.ID
 		default:
 			logger.Fatalf("Unsupported jobSpec.Type: %v", jobSpec.Type)
 		}
@@ -342,6 +349,7 @@ func (o *orm) JobsV2() ([]Job, error) {
 		Preload("FluxMonitorSpec").
 		Preload("JobSpecErrors").
 		Preload("KeeperSpec").
+		Preload("WebhookSpec").
 		Find(&jobs).
 		Error
 	for i := range jobs {
@@ -384,6 +392,7 @@ func (o *orm) FindJob(id int32) (Job, error) {
 		Preload("KeeperSpec").
 		Preload("CronSpec").
 		Preload("VRFSpec").
+		Preload("WebhookSpec").
 		First(&job, "jobs.id = ?", id).
 		Error
 	if job.OffchainreportingOracleSpec != nil {
