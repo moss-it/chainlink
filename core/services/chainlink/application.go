@@ -30,6 +30,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/services/directrequest"
 	"github.com/smartcontractkit/chainlink/core/services/eth"
 	"github.com/smartcontractkit/chainlink/core/services/fluxmonitor"
+	"github.com/smartcontractkit/chainlink/core/services/health"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/log"
 	"github.com/smartcontractkit/chainlink/core/services/offchainreporting"
@@ -81,6 +82,7 @@ type Application interface {
 	Start() error
 	Stop() error
 	GetLogger() *logger.Logger
+	GetHealthChecker() health.Checker
 	GetStore() *strpkg.Store
 	GetStatsPusher() synchronization.StatsPusher
 	WakeSessionReaper()
@@ -131,6 +133,7 @@ type ChainlinkApplication struct {
 	balanceMonitor           services.BalanceMonitor
 	explorerClient           synchronization.ExplorerClient
 	subservices              []StartCloser
+	HealthChecker            health.Checker
 	logger                   *logger.Logger
 
 	started     bool
@@ -152,6 +155,8 @@ func NewApplication(config *orm.Config, ethClient eth.Client, advisoryLocker pos
 	}
 
 	setupConfig(config, store)
+
+	healthChecker := health.NewChecker()
 
 	explorerClient := synchronization.ExplorerClient(&synchronization.NoopExplorerClient{})
 	statsPusher := synchronization.StatsPusher(&synchronization.NoopStatsPusher{})
@@ -317,6 +322,7 @@ func NewApplication(config *orm.Config, ethClient eth.Client, advisoryLocker pos
 		shutdownSignal:           shutdownSignal,
 		balanceMonitor:           balanceMonitor,
 		explorerClient:           explorerClient,
+		HealthChecker:            healthChecker,
 		logger:                   globalLogger,
 		// NOTE: Can keep things clean by putting more things in subservices
 		// instead of manually start/closing
@@ -555,6 +561,10 @@ func (app *ChainlinkApplication) GetStore() *strpkg.Store {
 
 func (app *ChainlinkApplication) GetLogger() *logger.Logger {
 	return app.logger
+}
+
+func (app *ChainlinkApplication) GetHealthChecker() health.Checker {
+	return app.HealthChecker
 }
 
 func (app *ChainlinkApplication) GetJobORM() job.ORM {
