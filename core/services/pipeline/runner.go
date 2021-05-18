@@ -353,7 +353,7 @@ func (r *runner) executeTaskRun(ctx context.Context, spec Spec, task Task, meta 
 		defer cancel()
 	}
 
-	result := task.Run(ctx, meta, inputs)
+	result := task.Run(ctx, nil, meta, inputs)
 	loggerFields = append(loggerFields, "result value", result.Value)
 	loggerFields = append(loggerFields, "result error", result.Error)
 	switch v := result.Value.(type) {
