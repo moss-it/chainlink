@@ -33,6 +33,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/store/orm"
 	"github.com/smartcontractkit/chainlink/core/store/presenters"
 	"github.com/smartcontractkit/chainlink/core/utils"
+	webPresenters "github.com/smartcontractkit/chainlink/core/web/presenters"
 
 	gethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -329,6 +330,49 @@ func (cli *Client) HardReset(c *clipkg.Context) error {
 
 	logger.Info("successfully reset the node state in the database")
 	return nil
+}
+
+type HealthCheckPresenter struct {
+	webPresenters.Check
+}
+
+func (p *HealthCheckPresenter) ToRow() []string {
+	return []string{
+		p.Name,
+		string(p.Status), // TODO: colorize fmt.Sprintf("%v", ),
+		p.Output,
+	}
+}
+
+type HealthCheckPresenters []HealthCheckPresenter
+
+// RenderTable implements TableRenderer
+func (ps HealthCheckPresenters) RenderTable(rt RendererTable) error {
+	headers := []string{"Name", "Status", "Output"}
+	rows := [][]string{}
+
+	for _, p := range ps {
+		rows = append(rows, p.ToRow())
+	}
+
+	renderList(headers, rows, rt.Writer)
+
+	return nil
+}
+
+// Status will display the health of various services
+func (cli *Client) Status(c *clipkg.Context) error {
+	resp, err := cli.HTTP.Get("/health?full=1", nil)
+	if err != nil {
+		return cli.errorOut(err)
+	}
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			err = multierr.Append(err, cerr)
+		}
+	}()
+
+	return cli.renderAPIResponse(resp, &HealthCheckPresenters{})
 }
 
 func (cli *Client) makeApp() (chainlink.Application, func(), error) {
