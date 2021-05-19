@@ -8,6 +8,7 @@ import (
 
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/eth"
+	"github.com/smartcontractkit/chainlink/core/services/health"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/store"
 	"github.com/smartcontractkit/chainlink/core/store/models"
@@ -39,6 +40,7 @@ type EthBroadcaster interface {
 	Trigger()
 
 	ProcessUnstartedEthTxs(models.Key) error
+	health.Checkable
 }
 
 type ethBroadcaster struct {
