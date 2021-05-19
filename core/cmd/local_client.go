@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/fatih/color"
 	"github.com/smartcontractkit/chainlink/core/store/dialects"
 	"github.com/smartcontractkit/chainlink/core/store/migrations"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/bulletprooftxmanager"
 	"github.com/smartcontractkit/chainlink/core/services/chainlink"
+	"github.com/smartcontractkit/chainlink/core/services/health"
 	"github.com/smartcontractkit/chainlink/core/static"
 	strpkg "github.com/smartcontractkit/chainlink/core/store"
 	"github.com/smartcontractkit/chainlink/core/store/models"
@@ -337,9 +339,21 @@ type HealthCheckPresenter struct {
 }
 
 func (p *HealthCheckPresenter) ToRow() []string {
+	red := color.New(color.FgRed).SprintFunc()
+	green := color.New(color.FgGreen).SprintFunc()
+
+	var status string
+
+	switch p.Status {
+	case health.StatusFailing:
+		status = red(p.Status)
+	case health.StatusPassing:
+		status = green(p.Status)
+	}
+
 	return []string{
 		p.Name,
-		string(p.Status), // TODO: colorize fmt.Sprintf("%v", ),
+		status,
 		p.Output,
 	}
 }
