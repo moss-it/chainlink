@@ -664,7 +664,7 @@ func (p *PollingDeviationChecker) SetOracleAddress() error {
 
 		return errors.Wrap(err, "failed to get list of oracles from FluxAggregator contract")
 	}
-	accounts := p.store.KeyStore.Accounts()
+	accounts := p.store.KeyStore.GetAccounts()
 	for _, acct := range accounts {
 		for _, oracleAddr := range oracleAddrs {
 			if acct.Address.Hex() == oracleAddr.Hex() {

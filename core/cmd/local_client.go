@@ -21,7 +21,6 @@ import (
 	"go.uber.org/multierr"
 
 	"github.com/pkg/errors"
-	"github.com/tidwall/gjson"
 
 	"github.com/smartcontractkit/chainlink/core/gracefulpanic"
 	"github.com/smartcontractkit/chainlink/core/logger"
@@ -34,6 +33,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/store/presenters"
 	"github.com/smartcontractkit/chainlink/core/utils"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	gethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	clipkg "github.com/urfave/cli"
@@ -110,14 +110,14 @@ func (cli *Client) RunNode(c *clipkg.Context) error {
 	}
 
 	if !store.Config.EthereumDisabled() {
-		fundingKey, currentBalance, err := setupFundingKey(context.TODO(), app.GetStore(), keyStorePwd)
+		acct, currentBalance, err := setupFundingAccount(context.TODO(), app.GetStore(), keyStorePwd)
 		if err != nil {
 			return cli.errorOut(errors.Wrap(err, "failed to generate a funding address"))
 		}
 		if currentBalance.Cmp(big.NewInt(0)) == 0 {
-			logger.Infow("The backup funding address does not have sufficient funds", "address", fundingKey.Address, "balance", currentBalance)
+			logger.Infow("The backup funding address does not have sufficient funds", "address", acct.Address.Hex(), "balance", currentBalance)
 		} else {
-			logger.Infow("Funding address ready", "address", fundingKey.Address, "current-balance", currentBalance)
+			logger.Infow("Funding address ready", "address", acct.Address.Hex(), "current-balance", currentBalance)
 		}
 	}
 
@@ -214,39 +214,18 @@ func logConfigVariables(store *strpkg.Store) error {
 	return nil
 }
 
-func setupFundingKey(ctx context.Context, str *strpkg.Store, pwd string) (*models.Key, *big.Int, error) {
-	key := models.Key{}
-	err := str.DB.Where("is_funding = TRUE").First(&key).Error
-	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil, err
+func setupFundingAccount(ctx context.Context, str *strpkg.Store, pwd string) (acct accounts.Account, balance *big.Int, err error) {
+	acct, existed, err := str.KeyStore.EnsureFundingAccount()
+	if err != nil {
+		return acct, nil, err
 	}
-	if err == nil && key.ID != 0 {
+	if existed {
 		// TODO How to make sure the EthClient is connected?
-		balance, ethErr := str.EthClient.BalanceAt(ctx, gethCommon.HexToAddress(string(key.Address)), nil)
-		return &key, balance, ethErr
+		balance, ethErr := str.EthClient.BalanceAt(ctx, acct.Address, nil)
+		return acct, balance, ethErr
 	}
-	// Key record not found so create one.
-	ethAccount, err := str.KeyStore.NewAccount()
-	if err != nil {
-		return nil, nil, err
-	}
-	exportedJSON, err := str.KeyStore.Export(ethAccount.Address, pwd)
-	if err != nil {
-		return nil, nil, err
-	}
-	key = models.Key{
-		Address:   models.EIP55Address(ethAccount.Address.Hex()),
-		IsFunding: true,
-		JSON: models.JSON{
-			Result: gjson.ParseBytes(exportedJSON),
-		},
-	}
-	// The key does not exist at this point, so we're only creating it here.
-	if err = str.CreateKeyIfNotExists(key); err != nil {
-		return nil, nil, err
-	}
-	logger.Infow("New funding address created", "address", key.Address, "balance", 0)
-	return &key, big.NewInt(0), nil
+	logger.Infow("New funding address created", "address", acct.Address.Hex(), "balance", 0)
+	return acct, big.NewInt(0), nil
 }
 
 // RebroadcastTransactions run locally to force manual rebroadcasting of
@@ -553,6 +532,8 @@ func (cli *Client) SetNextNonce(c *clipkg.Context) error {
 }
 
 // ImportKey imports a key to be used with the chainlink node
+// NOTE: This should not be run concurrently with a running chainlink node.
+// If you do run it concurrently, it will not take effect until the next reboot.
 func (cli *Client) ImportKey(c *clipkg.Context) error {
 	logger.SetLogger(cli.Config.CreateProductionLogger())
 	app, err := cli.AppFactory.NewApplication(cli.Config)
@@ -581,5 +562,5 @@ func (cli *Client) ImportKey(c *clipkg.Context) error {
 		return cli.errorOut(err)
 	}
 
-	return app.GetStore().SyncDiskKeyStoreToDB()
+	return app.GetStore().KeyStore.SyncDiskKeyStoreToDB()
 }

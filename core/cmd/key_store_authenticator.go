@@ -88,7 +88,7 @@ func (auth TerminalKeyStoreAuthenticator) validatePasswordStrength(store *store.
 	var instances int
 	for i := 0; i < len(password); i++ {
 		if password[i] == c {
-			instances += 1
+			instances++
 		} else {
 			instances = 1
 		}
@@ -133,12 +133,8 @@ func (auth TerminalKeyStoreAuthenticator) promptNewPassword(store *store.Store) 
 		if err != nil {
 			return password, errors.Wrap(err, "unexpectedly failed to unlock KeyStore")
 		}
-		_, err = store.KeyStore.NewAccount()
-		if err != nil {
-			return password, errors.Wrap(err, "failed to create new ETH key")
-		}
-		err = store.SyncDiskKeyStoreToDB()
-		return password, errors.Wrapf(err, "while syncing disk key store to DB")
+		_, err = store.KeyStore.CreateNewAccount()
+		return password, errors.Wrap(err, "failed to create new ETH key")
 	}
 }
 
@@ -152,12 +148,8 @@ func (auth TerminalKeyStoreAuthenticator) unlockNewWithPassword(store *store.Sto
 		return "", errors.Wrap(err, "Error unlocking key store")
 	}
 	fmt.Println("There are no accounts, creating a new account with the specified password")
-	_, err = store.KeyStore.NewAccount()
-	if err != nil {
-		return password, errors.Wrap(err, "failed to create new ETH key")
-	}
-	err = store.SyncDiskKeyStoreToDB()
-	return password, errors.Wrapf(err, "while syncing disk key store to DB")
+	_, err = store.KeyStore.CreateNewAccount()
+	return password, errors.Wrap(err, "failed to create new ETH key")
 }
 
 func (auth TerminalKeyStoreAuthenticator) unlockExistingWithPassword(store *store.Store, password string) (string, error) {

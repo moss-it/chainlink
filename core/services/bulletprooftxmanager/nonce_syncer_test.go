@@ -155,7 +155,7 @@ func Test_NonceSyncer_SyncAll(t *testing.T) {
 func assertDatabaseNonce(t *testing.T, store *store.Store, from common.Address, nonce int64) {
 	t.Helper()
 
-	k, err := store.KeyByAddress(from)
+	k, err := store.KeyStore.KeyByAddress(from)
 	require.NoError(t, err)
 	assert.Equal(t, nonce, k.NextNonce)
 }

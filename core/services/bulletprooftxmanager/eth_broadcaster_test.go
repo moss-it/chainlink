@@ -381,7 +381,7 @@ func TestEthBroadcaster_AssignsNonceOnStart(t *testing.T) {
 		defer eb.Close()
 
 		// Check key to make sure it has correct nonce assigned
-		keys, err := store.SendKeys()
+		keys, err := store.KeyStore.SendKeys()
 		require.NoError(t, err)
 		key := keys[0]
 

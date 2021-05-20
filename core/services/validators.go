@@ -324,7 +324,7 @@ func validateTaskTypeEthTx(task models.TaskSpec, store *store.Store) error {
 		if !common.IsHexAddress(fromAddress) {
 			return errors.Errorf("cannot set EthTx Task's fromAddress parameter invalid address %v", fromAddress)
 		}
-		key, err := store.KeyByAddress(common.HexToAddress(fromAddress))
+		key, err := store.KeyStore.KeyByAddress(common.HexToAddress(fromAddress))
 		if err != nil {
 			return errors.Errorf("error %v finding key for address %s", err, fromAddress)
 		}

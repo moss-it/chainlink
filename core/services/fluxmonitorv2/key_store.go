@@ -27,11 +27,11 @@ func NewKeyStore(store *corestore.Store) *KeyStore {
 
 // Accounts gets the node's accounts from the keystore
 func (ks *KeyStore) Accounts() []accounts.Account {
-	return ks.store.KeyStore.Accounts()
+	return ks.store.KeyStore.GetAccounts()
 }
 
 // GetRoundRobinAddress queries the database for the address of a random
 // ethereum key derived from the id.
 func (ks *KeyStore) GetRoundRobinAddress(db *gorm.DB) (common.Address, error) {
-	return ks.store.GetRoundRobinAddress(db)
+	return ks.store.KeyStore.GetRoundRobinAddress(db)
 }

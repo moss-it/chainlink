@@ -1395,85 +1395,10 @@ func (orm *ORM) BulkDeleteRuns(bulkQuery *models.BulkDeleteRunRequest) error {
 	})
 }
 
-// AllKeys returns all of the keys recorded in the database including the funding key.
-// You should use SendKeys() to retrieve all but the funding keys.
-func (orm *ORM) AllKeys() ([]models.Key, error) {
+// allKeys returns all of the keys recorded in the database including the funding key.
+func (orm *ORM) allKeys() ([]models.Key, error) {
 	var keys []models.Key
 	return keys, orm.DB.Order("created_at ASC, address ASC").Find(&keys).Error
-}
-
-// SendKeys will return only the keys that are not is_funding=true.
-func (orm *ORM) SendKeys() ([]models.Key, error) {
-	var keys []models.Key
-	err := orm.DB.Where("is_funding != TRUE").Order("created_at ASC, address ASC").Find(&keys).Error
-	return keys, err
-}
-
-// KeyByAddress returns the key matching provided address
-func (orm *ORM) KeyByAddress(address common.Address) (models.Key, error) {
-	var key models.Key
-	err := orm.DB.Where("address = ?", address).First(&key).Error
-	return key, err
-}
-
-// KeyExists returns true if a key exists in the database for this address
-func (orm *ORM) KeyExists(address common.Address) (bool, error) {
-	var key models.Key
-	err := orm.DB.Where("address = ?", address).First(&key).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return false, nil
-	}
-	return true, err
-}
-
-// DeleteKey deletes a key whose address matches the supplied bytes.
-func (orm *ORM) DeleteKey(address common.Address) error {
-	return orm.DB.Unscoped().Where("address = ?", address).Delete(models.Key{}).Error
-}
-
-// CreateKeyIfNotExists inserts a key if a key with that address doesn't exist already
-// If a key with this address exists, it does nothing
-func (orm *ORM) CreateKeyIfNotExists(k models.Key) error {
-	if err := orm.MustEnsureAdvisoryLock(); err != nil {
-		return err
-	}
-	err := orm.DB.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "address"}},
-		DoUpdates: clause.Assignments(map[string]interface{}{"deleted_at": nil}),
-	}).Create(&k).Error
-	if err == nil || err.Error() == "sql: no rows in result set" {
-		return nil
-	}
-	return err
-}
-
-// GetRoundRobinAddress queries the database for the address of a random ethereum key derived from the id.
-// This takes an optional param for a slice of addresses it should pick from. Leave empty to pick from all
-// addresses in the database.
-// NOTE: We can add more advanced logic here later such as sorting by priority
-// etc
-func (orm *ORM) GetRoundRobinAddress(db *gorm.DB, addresses ...common.Address) (address common.Address, err error) {
-	err = postgres.GormTransactionWithoutContext(db, func(tx *gorm.DB) error {
-		q := tx.
-			Clauses(clause.Locking{Strength: "UPDATE"}).
-			Order("last_used ASC NULLS FIRST, id ASC")
-		q = q.Where("is_funding = FALSE")
-		if len(addresses) > 0 {
-			q = q.Where("address in (?)", addresses)
-		}
-		keys := make([]models.Key, 0)
-		err = q.Find(&keys).Error
-		if err != nil {
-			return err
-		}
-		if len(keys) == 0 {
-			return errors.New("no keys available")
-		}
-		leastRecentlyUsedKey := keys[0]
-		address = leastRecentlyUsedKey.Address.Address()
-		return tx.Model(&leastRecentlyUsedKey).Update("last_used", time.Now()).Error
-	})
-	return address, err
 }
 
 // FindOrCreateFluxMonitorRoundStats find the round stats record for a given oracle on a given round, or creates
@@ -1542,7 +1467,7 @@ func (orm *ORM) ClobberDiskKeyStoreWithDBKeys(keysDir string) error {
 		return err
 	}
 
-	keys, err := orm.AllKeys()
+	keys, err := orm.allKeys()
 	if err != nil {
 		return err
 	}

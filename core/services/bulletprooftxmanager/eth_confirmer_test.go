@@ -1809,7 +1809,7 @@ func TestEthConfirmer_RebroadcastWhereNecessary_WhenOutOfEth(t *testing.T) {
 	_, fromAddress := cltest.MustAddRandomKeyToKeystore(t, store, 0)
 	store.KeyStore.Unlock(cltest.Password)
 
-	keys, err := store.SendKeys()
+	keys, err := store.KeyStore.SendKeys()
 	require.NoError(t, err)
 
 	config, cleanup := cltest.NewConfig(t)
@@ -1948,7 +1948,7 @@ func TestEthConfirmer_EnsureConfirmedTransactionsInLongestChain(t *testing.T) {
 	ethClient := new(mocks.Client)
 	store.EthClient = ethClient
 
-	keys, err := store.SendKeys()
+	keys, err := store.KeyStore.SendKeys()
 	require.NoError(t, err)
 
 	config, cleanup := cltest.NewConfig(t)

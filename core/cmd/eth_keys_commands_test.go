@@ -161,7 +161,7 @@ func TestClient_DeleteEthKey(t *testing.T) {
 	err = client.DeleteETHKey(c)
 	require.NoError(t, err)
 
-	_, err = store.KeyByAddress(account.Address)
+	_, err = store.KeyStore.KeyByAddress(account.Address)
 	assert.Error(t, err)
 }
 

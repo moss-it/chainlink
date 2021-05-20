@@ -109,10 +109,10 @@ func (e *EthTx) pickFromAddress(input models.RunInput, store *strpkg.Store) (com
 				" fromAddress is deprecated, it will be ignored and fromAddresses used instead. "+
 				"Specifying both of these keys in a job spec may result in an error in future versions of Chainlink", input.TaskRunID())
 		}
-		return store.GetRoundRobinAddress(db, e.FromAddresses...)
+		return store.KeyStore.GetRoundRobinAddress(db, e.FromAddresses...)
 	}
 	if e.FromAddress == utils.ZeroAddress {
-		return store.GetRoundRobinAddress(db, e.FromAddresses...)
+		return store.KeyStore.GetRoundRobinAddress(db, e.FromAddresses...)
 	}
 	logger.Warnf(`DEPRECATION WARNING: task spec for task run %s specified a fromAddress of %s. fromAddress has been deprecated and will be removed in a future version of Chainlink. Please use fromAddresses instead. You can pin a job to one address simply by using only one element, like so:
 {

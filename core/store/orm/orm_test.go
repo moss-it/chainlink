@@ -1174,7 +1174,7 @@ func TestORM_KeysOrdersByCreatedAtAsc(t *testing.T) {
 
 	require.NoError(t, orm.CreateKeyIfNotExists(later))
 
-	keys, err := store.SendKeys()
+	keys, err := store.KeyStore.SendKeys()
 	require.NoError(t, err)
 
 	require.Len(t, keys, 2)
@@ -1194,7 +1194,7 @@ func TestORM_SendKeys(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, keys, 2)
 
-	keys, err = store.SendKeys()
+	keys, err = store.KeyStore.SendKeys()
 	require.NoError(t, err)
 	require.Len(t, keys, 1)
 }
@@ -1206,7 +1206,7 @@ func TestORM_SyncDbKeyStoreToDisk(t *testing.T) {
 
 	orm := store.ORM
 
-	dbkeys, err := store.SendKeys()
+	dbkeys, err := store.KeyStore.SendKeys()
 	require.NoError(t, err)
 	require.Len(t, dbkeys, 0)
 
@@ -1220,7 +1220,7 @@ func TestORM_SyncDbKeyStoreToDisk(t *testing.T) {
 	err = orm.ClobberDiskKeyStoreWithDBKeys(keysDir)
 	require.NoError(t, err)
 
-	dbkeys, err = store.SendKeys()
+	dbkeys, err = store.KeyStore.SendKeys()
 	require.NoError(t, err)
 	require.Len(t, dbkeys, 1)
 
