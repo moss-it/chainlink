@@ -326,7 +326,10 @@ func NewApplication(config *orm.Config, ethClient eth.Client, advisoryLocker pos
 	}
 
 	for _, service := range app.subservices {
-		healthChecker.Register(reflect.TypeOf(service).Name(), service)
+		name := reflect.TypeOf(service).String()
+		if err := app.HealthChecker.Register(name, service); err != nil {
+			logger.Fatalf("error registering health check for %v", name)
+		}
 	}
 
 	headTrackables = append(
@@ -427,6 +430,10 @@ func (app *ChainlinkApplication) Start() error {
 
 	// EthClient must be dialed first because it is required in subtasks
 	if err := app.Store.EthClient.Dial(context.TODO()); err != nil {
+		return err
+	}
+
+	if err := app.HealthChecker.Start(); err != nil {
 		return err
 	}
 
