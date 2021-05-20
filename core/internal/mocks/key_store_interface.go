@@ -9,7 +9,11 @@ import (
 
 	common "github.com/ethereum/go-ethereum/common"
 
+	gorm "gorm.io/gorm"
+
 	mock "github.com/stretchr/testify/mock"
+
+	models "github.com/smartcontractkit/chainlink/core/store/models"
 
 	types "github.com/ethereum/go-ethereum/core/types"
 )
@@ -19,24 +23,8 @@ type KeyStoreInterface struct {
 	mock.Mock
 }
 
-// Accounts provides a mock function with given fields:
-func (_m *KeyStoreInterface) Accounts() []accounts.Account {
-	ret := _m.Called()
-
-	var r0 []accounts.Account
-	if rf, ok := ret.Get(0).(func() []accounts.Account); ok {
-		r0 = rf()
-	} else {
-		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]accounts.Account)
-		}
-	}
-
-	return r0
-}
-
-// Delete provides a mock function with given fields: address
-func (_m *KeyStoreInterface) Delete(address common.Address) error {
+// ArchiveKey provides a mock function with given fields: address
+func (_m *KeyStoreInterface) ArchiveKey(address common.Address) error {
 	ret := _m.Called(address)
 
 	var r0 error
@@ -47,6 +35,69 @@ func (_m *KeyStoreInterface) Delete(address common.Address) error {
 	}
 
 	return r0
+}
+
+// CreateNewAccount provides a mock function with given fields:
+func (_m *KeyStoreInterface) CreateNewAccount() (accounts.Account, error) {
+	ret := _m.Called()
+
+	var r0 accounts.Account
+	if rf, ok := ret.Get(0).(func() accounts.Account); ok {
+		r0 = rf()
+	} else {
+		r0 = ret.Get(0).(accounts.Account)
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func() error); ok {
+		r1 = rf()
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// DeleteKey provides a mock function with given fields: address
+func (_m *KeyStoreInterface) DeleteKey(address common.Address) error {
+	ret := _m.Called(address)
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(common.Address) error); ok {
+		r0 = rf(address)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// EnsureFundingAccount provides a mock function with given fields:
+func (_m *KeyStoreInterface) EnsureFundingAccount() (accounts.Account, bool, error) {
+	ret := _m.Called()
+
+	var r0 accounts.Account
+	if rf, ok := ret.Get(0).(func() accounts.Account); ok {
+		r0 = rf()
+	} else {
+		r0 = ret.Get(0).(accounts.Account)
+	}
+
+	var r1 bool
+	if rf, ok := ret.Get(1).(func() bool); ok {
+		r1 = rf()
+	} else {
+		r1 = ret.Get(1).(bool)
+	}
+
+	var r2 error
+	if rf, ok := ret.Get(2).(func() error); ok {
+		r2 = rf()
+	} else {
+		r2 = ret.Error(2)
+	}
+
+	return r0, r1, r2
 }
 
 // Export provides a mock function with given fields: address, newPassword
@@ -65,6 +116,29 @@ func (_m *KeyStoreInterface) Export(address common.Address, newPassword string) 
 	var r1 error
 	if rf, ok := ret.Get(1).(func(common.Address, string) error); ok {
 		r1 = rf(address, newPassword)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// FundingKeys provides a mock function with given fields:
+func (_m *KeyStoreInterface) FundingKeys() ([]models.Key, error) {
+	ret := _m.Called()
+
+	var r0 []models.Key
+	if rf, ok := ret.Get(0).(func() []models.Key); ok {
+		r0 = rf()
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]models.Key)
+		}
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func() error); ok {
+		r1 = rf()
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -109,6 +183,36 @@ func (_m *KeyStoreInterface) GetAccounts() []accounts.Account {
 	return r0
 }
 
+// GetRoundRobinAddress provides a mock function with given fields: db, addresses
+func (_m *KeyStoreInterface) GetRoundRobinAddress(db *gorm.DB, addresses ...common.Address) (common.Address, error) {
+	_va := make([]interface{}, len(addresses))
+	for _i := range addresses {
+		_va[_i] = addresses[_i]
+	}
+	var _ca []interface{}
+	_ca = append(_ca, db)
+	_ca = append(_ca, _va...)
+	ret := _m.Called(_ca...)
+
+	var r0 common.Address
+	if rf, ok := ret.Get(0).(func(*gorm.DB, ...common.Address) common.Address); ok {
+		r0 = rf(db, addresses...)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(common.Address)
+		}
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(*gorm.DB, ...common.Address) error); ok {
+		r1 = rf(db, addresses...)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
 // HasAccountWithAddress provides a mock function with given fields: _a0
 func (_m *KeyStoreInterface) HasAccountWithAddress(_a0 common.Address) bool {
 	ret := _m.Called(_a0)
@@ -137,8 +241,8 @@ func (_m *KeyStoreInterface) HasAccounts() bool {
 	return r0
 }
 
-// Import provides a mock function with given fields: keyJSON, oldPassword
-func (_m *KeyStoreInterface) Import(keyJSON []byte, oldPassword string) (accounts.Account, error) {
+// ImportKey provides a mock function with given fields: keyJSON, oldPassword
+func (_m *KeyStoreInterface) ImportKey(keyJSON []byte, oldPassword string) (accounts.Account, error) {
 	ret := _m.Called(keyJSON, oldPassword)
 
 	var r0 accounts.Account
@@ -158,15 +262,38 @@ func (_m *KeyStoreInterface) Import(keyJSON []byte, oldPassword string) (account
 	return r0, r1
 }
 
-// NewAccount provides a mock function with given fields:
-func (_m *KeyStoreInterface) NewAccount() (accounts.Account, error) {
+// KeyByAddress provides a mock function with given fields: address
+func (_m *KeyStoreInterface) KeyByAddress(address common.Address) (models.Key, error) {
+	ret := _m.Called(address)
+
+	var r0 models.Key
+	if rf, ok := ret.Get(0).(func(common.Address) models.Key); ok {
+		r0 = rf(address)
+	} else {
+		r0 = ret.Get(0).(models.Key)
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(common.Address) error); ok {
+		r1 = rf(address)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// SendKeys provides a mock function with given fields:
+func (_m *KeyStoreInterface) SendKeys() ([]models.Key, error) {
 	ret := _m.Called()
 
-	var r0 accounts.Account
-	if rf, ok := ret.Get(0).(func() accounts.Account); ok {
+	var r0 []models.Key
+	if rf, ok := ret.Get(0).(func() []models.Key); ok {
 		r0 = rf()
 	} else {
-		r0 = ret.Get(0).(accounts.Account)
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]models.Key)
+		}
 	}
 
 	var r1 error
@@ -202,6 +329,20 @@ func (_m *KeyStoreInterface) SignTx(account accounts.Account, tx *types.Transact
 	return r0, r1
 }
 
+// SyncDiskKeyStoreToDB provides a mock function with given fields:
+func (_m *KeyStoreInterface) SyncDiskKeyStoreToDB() error {
+	ret := _m.Called()
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func() error); ok {
+		r0 = rf()
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
 // Unlock provides a mock function with given fields: password
 func (_m *KeyStoreInterface) Unlock(password string) error {
 	ret := _m.Called(password)
@@ -216,18 +357,25 @@ func (_m *KeyStoreInterface) Unlock(password string) error {
 	return r0
 }
 
-// Wallets provides a mock function with given fields:
-func (_m *KeyStoreInterface) Wallets() []accounts.Wallet {
+// UnlockedKeys provides a mock function with given fields:
+func (_m *KeyStoreInterface) UnlockedKeys() ([]models.Key, error) {
 	ret := _m.Called()
 
-	var r0 []accounts.Wallet
-	if rf, ok := ret.Get(0).(func() []accounts.Wallet); ok {
+	var r0 []models.Key
+	if rf, ok := ret.Get(0).(func() []models.Key); ok {
 		r0 = rf()
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).([]accounts.Wallet)
+			r0 = ret.Get(0).([]models.Key)
 		}
 	}
 
-	return r0
+	var r1 error
+	if rf, ok := ret.Get(1).(func() error); ok {
+		r1 = rf()
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
 }
