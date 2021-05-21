@@ -5,7 +5,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-	"github.com/smartcontractkit/chainlink/core/logger"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 type Checkable interface {
@@ -46,6 +47,15 @@ const (
 	StatusFailing Status = "failing"
 
 	interval = 15 * time.Second
+)
+
+var (
+	metrics = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "health",
+		Help: "Health status by service",
+	},
+		[]string{"service_id"},
+	)
 )
 
 func NewChecker() Checker {
@@ -104,6 +114,13 @@ func (c *checker) update() {
 
 	for name, state := range state {
 		c.state[name] = state
+
+		// report metrics to prometheus
+		value := 0
+		if state.healthy == nil {
+			value = 1
+		}
+		metrics.WithLabelValues(name).Set(float64(value))
 	}
 }
 
