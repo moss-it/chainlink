@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/smartcontractkit/chainlink/core/logger"
+	"github.com/smartcontractkit/chainlink/core/service"
 	"github.com/smartcontractkit/chainlink/core/services/eth"
-	"github.com/smartcontractkit/chainlink/core/services/health"
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/store"
 	"github.com/smartcontractkit/chainlink/core/store/models"
@@ -34,13 +34,11 @@ import (
 // - transition of eth_txes out of unstarted into either fatal_error or unconfirmed
 // - existence of a saved eth_tx_attempt
 type EthBroadcaster interface {
-	Start() error
-	Close() error
+	service.Service
 
 	Trigger()
 
 	ProcessUnstartedEthTxs(models.Key) error
-	health.Checkable
 }
 
 type ethBroadcaster struct {
