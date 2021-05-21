@@ -108,9 +108,10 @@ func (ec *ethConfirmer) OnNewLongestChain(ctx context.Context, head models.Head)
 }
 
 func (ec *ethConfirmer) Start() error {
-	if !ec.OkayToStart() {
-		return errors.New("EthConfirmer has already been started")
-	}
+	return ec.StartOnce("eth confirmer", ec.start)
+}
+
+func (ec *ethConfirmer) start() error {
 	if ec.config.EthGasBumpThreshold() == 0 {
 		logger.Infow("EthConfirmer: Gas bumping is disabled (ETH_GAS_BUMP_THRESHOLD set to 0)", "ethGasBumpThreshold", 0)
 	} else {
@@ -134,10 +135,10 @@ func (ec *ethConfirmer) Start() error {
 }
 
 func (ec *ethConfirmer) Close() error {
-	if !ec.OkayToStop() {
-		return errors.New("EthConfirmer has already been stopped")
-	}
+	return ec.StopOnce("eth confirmer", ec.close)
+}
 
+func (ec *ethConfirmer) close() error {
 	if ec.reaper != nil {
 		go func() {
 			defer ec.wg.Done()

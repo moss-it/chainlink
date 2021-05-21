@@ -1,7 +1,6 @@
 package offchainreporting
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/smartcontractkit/chainlink/core/services/postgres"
@@ -35,9 +34,10 @@ func NewResultRunSaver(db *gorm.DB, runResults <-chan pipeline.RunWithResults, p
 }
 
 func (r *RunResultSaver) Start() error {
-	if !r.OkayToStart() {
-		return errors.New("cannot start already started run result saver")
-	}
+	return r.StartOnce("run saver", r.start)
+}
+
+func (r *RunResultSaver) start() error {
 	go gracefulpanic.WrapRecover(func() {
 		for {
 			select {
@@ -60,9 +60,10 @@ func (r *RunResultSaver) Start() error {
 }
 
 func (r *RunResultSaver) Close() error {
-	if !r.OkayToStop() {
-		return errors.New("cannot close unstarted run result saver")
-	}
+	return r.StopOnce("run saver", r.close)
+}
+
+func (r *RunResultSaver) close() error {
 	r.done <- struct{}{}
 
 	// In the unlikely event that there are remaining runResults to write,

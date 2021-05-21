@@ -76,10 +76,9 @@ func NewEthBroadcaster(store *store.Store, config orm.ConfigReader, eventBroadca
 }
 
 func (eb *ethBroadcaster) Start() error {
-	if !eb.OkayToStart() {
-		return errors.New("EthBroadcaster is already started")
-	}
-
+	return eb.StartOnce("eth broadcaster", eb.start)
+}
+func (eb *ethBroadcaster) start() error {
 	var err error
 	eb.ethTxInsertListener, err = eb.eventBroadcaster.Subscribe(postgres.ChannelInsertOnEthTx, "")
 	if err != nil {
@@ -103,10 +102,10 @@ func (eb *ethBroadcaster) Start() error {
 }
 
 func (eb *ethBroadcaster) Close() error {
-	if !eb.OkayToStop() {
-		return errors.New("EthBroadcaster is already stopped")
-	}
+	return eb.StopOnce("eth broadcaster", eb.close)
+}
 
+func (eb *ethBroadcaster) close() error {
 	if eb.ethTxInsertListener != nil {
 		eb.ethTxInsertListener.Close()
 	}
