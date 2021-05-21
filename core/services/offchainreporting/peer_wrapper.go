@@ -40,7 +40,11 @@ type (
 // It currently only supports one peerID/key
 // It should be fairly easy to modify it to support multiple peerIDs/keys using e.g. a map
 func NewSingletonPeerWrapper(keyStore *KeyStore, config *orm.Config, db *gorm.DB) *SingletonPeerWrapper {
-	return &SingletonPeerWrapper{keyStore, config, db, nil, "", nil, utils.StartStopOnce{}}
+	return &SingletonPeerWrapper{
+		keyStore: keyStore,
+		config:   config,
+		db:       db,
+	}
 }
 
 func (p *SingletonPeerWrapper) IsStarted() bool {
@@ -48,7 +52,7 @@ func (p *SingletonPeerWrapper) IsStarted() bool {
 }
 
 func (p *SingletonPeerWrapper) Start() (err error) {
-	return p.StartOnce("Singleton peer wrapper", p.start)
+	return p.StartOnce("SingletonPeerWrapper", p.start)
 }
 
 func (p *SingletonPeerWrapper) start() (err error) {
@@ -135,7 +139,7 @@ func (p *SingletonPeerWrapper) start() (err error) {
 
 // Close closes the peer and peerstore
 func (p *SingletonPeerWrapper) Close() (err error) {
-	return p.StopOnce("Singleton peer wrapper", p.close)
+	return p.StopOnce("SingletonPeerWrapper", p.close)
 }
 
 func (p *SingletonPeerWrapper) close() (err error) {

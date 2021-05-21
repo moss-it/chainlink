@@ -120,10 +120,11 @@ func NewOCRContractTracker(
 
 // Start must be called before logs can be delivered
 // It ought to be called before starting OCR
-func (t *OCRContractTracker) Start() (err error) {
-	if !t.OkayToStart() {
-		return errors.New("OCRContractTracker: already started")
-	}
+func (t *OCRContractTracker) Start() error {
+	return t.StartOnce("OCRContractTracker", t.start)
+}
+
+func (t *OCRContractTracker) start() (err error) {
 	unsubscribe := t.logBroadcaster.Register(t, log.ListenerOpts{
 		Contract: t.contract,
 		Logs: []generated.AbigenLog{
@@ -146,9 +147,10 @@ func (t *OCRContractTracker) Start() (err error) {
 
 // Close should be called after teardown of the OCR job relying on this tracker
 func (t *OCRContractTracker) Close() error {
-	if !t.OkayToStop() {
-		return errors.New("OCRContractTracker already stopped")
-	}
+	return t.StopOnce("OCRContractTracker", t.close)
+}
+
+func (t *OCRContractTracker) close() error {
 	t.ctxCancel()
 	t.wg.Wait()
 	t.unsubscribeLogs()

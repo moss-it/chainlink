@@ -116,9 +116,10 @@ func (gu *gasUpdater) OnNewLongestChain(ctx context.Context, head models.Head) {
 }
 
 func (gu *gasUpdater) Start() error {
-	if !gu.OkayToStart() {
-		return errors.New("GasUpdater has already been started")
-	}
+	return gu.StartOnce("GasUpdater", gu.start)
+}
+
+func (gu *gasUpdater) start() error {
 	gu.logger.Debugw("GasUpdater: starting")
 	if uint(gu.config.GasUpdaterBlockHistorySize()) > gu.config.EthFinalityDepth() {
 		gu.logger.Warnf("GasUpdater: GAS_UPDATER_BLOCK_HISTORY_SIZE=%v is greater than ETH_FINALITY_DEPTH=%v, blocks deeper than finality depth will be refetched on every gas updater cycle, causing unnecessary load on the eth node. Consider decreasing GAS_UPDATER_BLOCK_HISTORY_SIZE or increasing ETH_FINALITY_DEPTH", gu.config.GasUpdaterBlockHistorySize(), gu.config.EthFinalityDepth())
@@ -139,9 +140,10 @@ func (gu *gasUpdater) Start() error {
 }
 
 func (gu *gasUpdater) Close() error {
-	if !gu.OkayToStop() {
-		return errors.New("GasUpdater has already been stopped")
-	}
+	return gu.StopOnce("GasUpdater", gu.close)
+}
+
+func (gu *gasUpdater) close() error {
 	gu.ctxCancel()
 	gu.wg.Wait()
 	return nil
