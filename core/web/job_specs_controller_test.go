@@ -11,13 +11,13 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
-
-	"github.com/smartcontractkit/chainlink/core/services"
+	"github.com/stretchr/testify/mock"
 
 	"github.com/manyminds/api2go/jsonapi"
 	"github.com/smartcontractkit/chainlink/core/adapters"
 	"github.com/smartcontractkit/chainlink/core/auth"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/core/services/webhook"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/store/presenters"
 	"github.com/smartcontractkit/chainlink/core/utils"
@@ -263,7 +263,7 @@ func TestJobSpecsController_Create_CustomName(t *testing.T) {
 func TestJobSpecsController_CreateExternalInitiator_Success(t *testing.T) {
 	t.Parallel()
 
-	var eiReceived services.JobSpecNotice
+	var eiReceived webhook.JobSpecNotice
 	eiMockServer, assertCalled := cltest.NewHTTPMockServer(t, http.StatusOK, "POST", "",
 		func(header http.Header, body string) {
 			err := json.Unmarshal([]byte(body), &eiReceived)
@@ -276,7 +276,7 @@ func TestJobSpecsController_CreateExternalInitiator_Success(t *testing.T) {
 	defer assertMocksCalled()
 	app, cleanup := cltest.NewApplication(t,
 		ethClient,
-		services.NewExternalInitiatorManager(),
+		cltest.UseRealExternalInitiatorManager,
 	)
 	defer cleanup()
 	app.Start()
@@ -293,7 +293,7 @@ func TestJobSpecsController_CreateExternalInitiator_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	jobSpec := cltest.FixtureCreateJobViaWeb(t, app, "./../testdata/jsonspecs/external_initiator_job.json")
-	expected := services.JobSpecNotice{
+	expected := webhook.JobSpecNotice{
 		JobID:  jobSpec.ID,
 		Type:   models.InitiatorExternal,
 		Params: cltest.JSONFromString(t, `{"foo":"bar"}`),
@@ -362,7 +362,7 @@ func TestJobSpecsController_Create_FluxMonitor_disabled(t *testing.T) {
 	config := cltest.NewTestConfig(t)
 	config.Set("CHAINLINK_DEV", "FALSE")
 	config.Set("FEATURE_FLUX_MONITOR", "FALSE")
-	config.Set("GAS_UPDATER_ENABLED", false)
+	config.Set("GAS_ESTIMATOR_MODE", "FixedPrice")
 
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
 	defer assertMocksCalled()
@@ -389,7 +389,7 @@ func TestJobSpecsController_Create_FluxMonitor_enabled(t *testing.T) {
 	config := cltest.NewTestConfig(t)
 	config.Set("CHAINLINK_DEV", "FALSE")
 	config.Set("FEATURE_FLUX_MONITOR", "TRUE")
-	config.Set("GAS_UPDATER_ENABLED", false)
+	config.Set("GAS_ESTIMATOR_MODE", "FixedPrice")
 
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
 	defer assertMocksCalled()
@@ -427,7 +427,7 @@ func TestJobSpecsController_Create_FluxMonitor_Bridge(t *testing.T) {
 	config := cltest.NewTestConfig(t)
 	config.Set("CHAINLINK_DEV", "FALSE")
 	config.Set("FEATURE_FLUX_MONITOR", "TRUE")
-	config.Set("GAS_UPDATER_ENABLED", false)
+	config.Set("GAS_ESTIMATOR_MODE", "FixedPrice")
 
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
 	defer assertMocksCalled()
@@ -471,7 +471,7 @@ func TestJobSpecsController_Create_FluxMonitor_NoBridgeError(t *testing.T) {
 	config := cltest.NewTestConfig(t)
 	config.Set("CHAINLINK_DEV", "FALSE")
 	config.Set("FEATURE_FLUX_MONITOR", "TRUE")
-	config.Set("GAS_UPDATER_ENABLED", false)
+	config.Set("GAS_ESTIMATOR_MODE", "FixedPrice")
 
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
 	defer assertMocksCalled()
@@ -716,10 +716,10 @@ func TestJobSpecsController_Show_MultipleTasks(t *testing.T) {
 	// Create a task with multiple jobs
 	j := cltest.NewJobWithWebInitiator()
 	j.Tasks = []models.TaskSpec{
-		models.TaskSpec{Type: models.MustNewTaskType("Task1")},
-		models.TaskSpec{Type: models.MustNewTaskType("Task2")},
-		models.TaskSpec{Type: models.MustNewTaskType("Task3")},
-		models.TaskSpec{Type: models.MustNewTaskType("Task4")},
+		{Type: models.MustNewTaskType("Task1")},
+		{Type: models.MustNewTaskType("Task2")},
+		{Type: models.MustNewTaskType("Task3")},
+		{Type: models.MustNewTaskType("Task4")},
 	}
 	assert.NoError(t, app.Store.CreateJob(&j))
 
@@ -801,7 +801,9 @@ func TestJobSpecsController_Show_Unauthenticated(t *testing.T) {
 
 func TestJobSpecsController_Destroy(t *testing.T) {
 	t.Parallel()
-	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
+	ethClient, s, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
+	ethClient.On("SubscribeFilterLogs", mock.Anything, mock.Anything, mock.Anything).Maybe().Return(s, nil)
+
 	defer assertMocksCalled()
 	app, cleanup := cltest.NewApplication(t,
 		ethClient,

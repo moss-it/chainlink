@@ -2,10 +2,12 @@ package log
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/smartcontractkit/chainlink/core/null"
 	"gorm.io/gorm"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -14,14 +16,15 @@ import (
 
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated"
 	"github.com/smartcontractkit/chainlink/core/logger"
+	"github.com/smartcontractkit/chainlink/core/service"
 	"github.com/smartcontractkit/chainlink/core/services/eth"
+	httypes "github.com/smartcontractkit/chainlink/core/services/headtracker/types"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 //go:generate mockery --name Broadcaster --output ./mocks/ --case=underscore --structname Broadcaster --filename broadcaster.go
 //go:generate mockery --name Listener --output ./mocks/ --case=underscore --structname Listener --filename listener.go
-//go:generate mockery --name AbigenContract --output ./mocks/ --case=underscore --structname AbigenContract --filename abigen_contract.go
 
 type (
 	// The Broadcaster manages log subscription requests for the Chainlink node.  Instead
@@ -38,11 +41,10 @@ type (
 	// Of course, these backfilled logs + any new logs will only be sent after the NumConfirmations for given subscriber.
 	Broadcaster interface {
 		utils.DependentAwaiter
-		Start() error
-		Stop() error
+		service.Service
+		httypes.HeadTrackable
 		IsConnected() bool
 		Register(listener Listener, opts ListenerOpts) (unsubscribe func())
-		SetLatestHeadFromStorage(head *models.Head)
 		LatestHead() *models.Head
 		TrackedAddressesCount() uint32
 		// DB interactions
@@ -79,24 +81,20 @@ type (
 	}
 
 	ListenerOpts struct {
-		Contract AbigenContract
-
-		// Event types to receive, filtered only by event
-		Logs []generated.AbigenLog
+		Contract common.Address
 
 		// Event types to receive, with value filter for each field in the event
 		// No filter or an empty filter for a given field position mean: all values allowed
 		// the key should be a result of AbigenLog.Topic() call
 		LogsWithTopics map[common.Hash][][]Topic
 
+		ParseLog ParseLogFunc
+
 		// Minimum number of block confirmations before the log is received
 		NumConfirmations uint64
 	}
 
-	AbigenContract interface {
-		Address() common.Address
-		ParseLog(log types.Log) (generated.AbigenLog, error)
-	}
+	ParseLogFunc func(log types.Log) (generated.AbigenLog, error)
 
 	registration struct {
 		listener Listener
@@ -109,7 +107,7 @@ type (
 var _ Broadcaster = (*broadcaster)(nil)
 
 // NewBroadcaster creates a new instance of the broadcaster
-func NewBroadcaster(orm ORM, ethClient eth.Client, config Config) *broadcaster {
+func NewBroadcaster(orm ORM, ethClient eth.Client, config Config, highestSavedHead *models.Head) *broadcaster {
 	chStop := make(chan struct{})
 	return &broadcaster{
 		orm:              orm,
@@ -123,21 +121,13 @@ func NewBroadcaster(orm ORM, ethClient eth.Client, config Config) *broadcaster {
 		newHeads:         utils.NewMailbox(1),
 		DependentAwaiter: utils.NewDependentAwaiter(),
 		chStop:           chStop,
+		latestHeadFromDb: highestSavedHead,
 	}
-}
-
-func (b *broadcaster) SetLatestHeadFromStorage(head *models.Head) {
-	b.latestHeadFromDb = head
 }
 
 func (b *broadcaster) Start() error {
 	return b.StartOnce("LogBroadcaster", func() error {
 		b.wgDone.Add(2)
-		if b.latestHeadFromDb != nil {
-			logger.Debugw("LogBroadcaster: Starting at latest head from DB", "blockNumber", b.latestHeadFromDb.Number, "blockHash", b.latestHeadFromDb.Hash)
-		} else {
-			logger.Info("LogBroadcaster: Latest head from DB was not set or does not exist.")
-		}
 		go b.awaitInitialSubscribers()
 		return nil
 	})
@@ -151,7 +141,7 @@ func (b *broadcaster) TrackedAddressesCount() uint32 {
 	return atomic.LoadUint32(&b.trackedAddressesCount)
 }
 
-func (b *broadcaster) Stop() error {
+func (b *broadcaster) Close() error {
 	return b.StopOnce("LogBroadcaster", func() error {
 		close(b.chStop)
 		b.wgDone.Wait()
@@ -180,12 +170,8 @@ func (b *broadcaster) awaitInitialSubscribers() {
 }
 
 func (b *broadcaster) Register(listener Listener, opts ListenerOpts) (unsubscribe func()) {
-	if len(opts.Logs) == 0 && len(opts.LogsWithTopics) == 0 {
+	if len(opts.LogsWithTopics) == 0 {
 		logger.Fatal("Must supply at least 1 Log to Register")
-	}
-
-	if len(opts.Logs) > 0 && len(opts.LogsWithTopics) > 0 {
-		logger.Fatal("Must use either Logs or LogsWithTopics but not both")
 	}
 
 	wasOverCapacity := b.addSubscriber.Deliver(registration{listener, opts})
@@ -201,7 +187,6 @@ func (b *broadcaster) Register(listener Listener, opts ListenerOpts) (unsubscrib
 }
 
 func (b *broadcaster) Connect(head *models.Head) error { return nil }
-func (b *broadcaster) Disconnect()                     {}
 
 func (b *broadcaster) OnNewLongestChain(ctx context.Context, head models.Head) {
 	wasOverCapacity := b.newHeads.Deliver(head)
@@ -237,7 +222,30 @@ func (b *broadcaster) startResubscribeLoop() {
 			return
 		}
 
-		chBackfilledLogs, abort := b.ethSubscriber.backfillLogs(b.latestHeadFromDb, addresses, topics)
+		var backfillFrom null.Int64
+		if b.latestHeadFromDb != nil {
+			// The backfill needs to start at an earlier block than the one last saved in DB, to account for:
+			// - keeping logs in the in-memory buffers in registration.go
+			//   (which will be lost on node restart) for MAX(NumConfirmations of subscribers)
+			// - HeadTracker saving the heads to DB asynchronously versus LogBroadcaster, where a head
+			//   (or more heads on fast chains) may be saved but not yet processed by LB
+			//   using BlockBackfillDepth makes sure the backfill will be dependent on the per-chain configuration
+			from := b.latestHeadFromDb.Number -
+				int64(b.registrations.highestNumConfirmations) -
+				int64(b.config.BlockBackfillDepth())
+
+			logger.Debugw("LogBroadcaster: Using highest seen head as part of the initial backfill",
+				"blockNumber", b.latestHeadFromDb.Number, "blockHash", b.latestHeadFromDb.Hash,
+				"highestNumConfirmations", b.registrations.highestNumConfirmations, "blockBackfillDepth", b.config.BlockBackfillDepth(),
+			)
+
+			if from < 0 {
+				from = 0
+			}
+			backfillFrom = null.Int64From(from)
+		}
+
+		chBackfilledLogs, abort := b.ethSubscriber.backfillLogs(backfillFrom, addresses, topics)
 		if abort {
 			return
 		}
@@ -311,6 +319,7 @@ func (b *broadcaster) eventLoop(chRawLogs <-chan types.Log, chErr <-chan error) 
 
 func (b *broadcaster) onNewLog(log types.Log) {
 	if log.Removed {
+		b.logPool.removeLog(log)
 		return
 	} else if !b.registrations.isAddressRegistered(log.Address) {
 		return
@@ -338,10 +347,32 @@ func (b *broadcaster) onNewHeads() {
 	// when 'b.newHeads.Notify()' receives more times that the number of items in the mailbox
 	// Some heads may be missed (which is fine for LogBroadcaster logic) but the latest one in a burst will be received
 	if latestHead != nil {
-		logger.Debugw("LogBroadcaster: Received head", "blockNumber", latestHead.Number, "blockHash", latestHead.Hash)
+		logger.Debugw("LogBroadcaster: Received head", "blockNumber", latestHead.Number,
+			"blockHash", latestHead.Hash, "parentHash", latestHead.ParentHash, "chainLen", latestHead.ChainLength())
 
-		logs := b.logPool.getLogsToSend(*latestHead, b.registrations.highestNumConfirmations, uint64(b.config.EthFinalityDepth()))
-		b.registrations.sendLogs(logs, b.orm, *latestHead)
+		keptLogsDepth := uint64(b.config.EthFinalityDepth())
+		if b.registrations.highestNumConfirmations > keptLogsDepth {
+			keptLogsDepth = b.registrations.highestNumConfirmations
+		}
+
+		latestBlockNum := latestHead.Number
+		keptDepth := latestBlockNum - int64(keptLogsDepth)
+		if keptDepth < 0 {
+			keptDepth = 0
+		}
+
+		logs, minBlockNum := b.logPool.getLogsToSend(latestBlockNum)
+
+		if len(logs) > 0 {
+			broadcasts, err := b.orm.FindConsumedLogs(minBlockNum, latestBlockNum)
+			if err != nil {
+				logger.Errorf("Failed to query for log broadcasts, %v", err)
+				return
+			}
+
+			b.registrations.sendLogs(logs, *latestHead, broadcasts)
+		}
+		b.logPool.deleteOlderLogs(uint64(keptDepth))
 	}
 }
 
@@ -426,3 +457,35 @@ func (b *broadcaster) WasAlreadyConsumed(db *gorm.DB, lb Broadcast) (bool, error
 func (b *broadcaster) MarkConsumed(db *gorm.DB, lb Broadcast) error {
 	return b.orm.MarkBroadcastConsumed(db, lb.RawLog().BlockHash, lb.RawLog().BlockNumber, lb.RawLog().Index, lb.JobID())
 }
+
+type NullBroadcaster struct{ ErrMsg string }
+
+func (n *NullBroadcaster) IsConnected() bool { return false }
+func (n *NullBroadcaster) Register(listener Listener, opts ListenerOpts) (unsubscribe func()) {
+	return func() {}
+}
+func (n *NullBroadcaster) LatestHead() *models.Head {
+	return nil
+}
+func (n *NullBroadcaster) TrackedAddressesCount() uint32 {
+	return 0
+}
+func (n *NullBroadcaster) WasAlreadyConsumed(db *gorm.DB, lb Broadcast) (bool, error) {
+	return false, errors.New(n.ErrMsg)
+}
+func (n *NullBroadcaster) MarkConsumed(db *gorm.DB, lb Broadcast) error {
+	return errors.New(n.ErrMsg)
+}
+func (n *NullBroadcaster) AddDependents(int) {}
+func (n *NullBroadcaster) AwaitDependents() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+func (n *NullBroadcaster) DependentReady()                                {}
+func (n *NullBroadcaster) Start() error                                   { return nil }
+func (n *NullBroadcaster) Close() error                                   { return nil }
+func (n *NullBroadcaster) Healthy() error                                 { return nil }
+func (n *NullBroadcaster) Ready() error                                   { return nil }
+func (n *NullBroadcaster) Connect(*models.Head) error                     { return nil }
+func (n *NullBroadcaster) OnNewLongestChain(context.Context, models.Head) {}

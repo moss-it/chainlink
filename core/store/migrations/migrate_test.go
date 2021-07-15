@@ -4,10 +4,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/smartcontractkit/chainlink/core/services/job"
+
+	uuid "github.com/satori/go.uuid"
+
 	"github.com/smartcontractkit/chainlink/core/assets"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/services/job"
+	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/core/services/pipeline"
 	"github.com/smartcontractkit/chainlink/core/store/migrations"
 	"github.com/smartcontractkit/chainlink/core/store/models"
@@ -19,7 +24,7 @@ import (
 )
 
 func TestMigrate_Initial(t *testing.T) {
-	_, orm, cleanup := cltest.BootstrapThrowawayORM(t, "migrations", false)
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations", false)
 	defer cleanup()
 
 	err := migrations.MigrateUp(orm.DB, "1611847145")
@@ -104,7 +109,7 @@ func (TaskSpec) TableName() string {
 }
 
 func TestMigrate_BridgeFK(t *testing.T) {
-	_, orm, cleanup := cltest.BootstrapThrowawayORM(t, "migrations_bridgefk", false)
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_bridgefk", false)
 	defer cleanup()
 
 	require.NoError(t, migrations.MigrateUp(orm.DB, "0009_add_min_payment_to_flux_monitor_spec"))
@@ -153,7 +158,7 @@ func TestMigrate_BridgeFK(t *testing.T) {
 }
 
 func TestMigrate_ChangeJobsToNumeric(t *testing.T) {
-	_, orm, cleanup := cltest.BootstrapThrowawayORM(t, "migrations_change_jobs_to_numeric", false)
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_change_jobs_to_numeric", false)
 	defer cleanup()
 
 	require.NoError(t, migrations.MigrateUp(orm.DB, "0010_bridge_fk"))
@@ -162,7 +167,32 @@ func TestMigrate_ChangeJobsToNumeric(t *testing.T) {
 	jobSpec.MinPayment = assets.NewLink(100)
 	orm.DB.Create(&jobSpec)
 
-	fmSpec := job.FluxMonitorSpec{
+	// These structs are copied from the `job` package because otherwise, changes
+	// to them in subsequent migrations will cause this test to fail.
+	type FluxMonitorSpec struct {
+		ID                int32               `toml:"-" gorm:"primary_key"`
+		ContractAddress   ethkey.EIP55Address `toml:"contractAddress"`
+		Threshold         float32             `toml:"threshold,float"`
+		AbsoluteThreshold float32             `toml:"absoluteThreshold,float" gorm:"type:float;not null"`
+		PollTimerPeriod   time.Duration       `gorm:"type:jsonb"`
+		PollTimerDisabled bool                `gorm:"type:jsonb"`
+		IdleTimerPeriod   time.Duration       `gorm:"type:jsonb"`
+		IdleTimerDisabled bool                `gorm:"type:jsonb"`
+		MinPayment        *assets.Link
+		CreatedAt         time.Time `toml:"-"`
+		UpdatedAt         time.Time `toml:"-"`
+	}
+
+	type Job struct {
+		ID                int32     `toml:"-" gorm:"primary_key"`
+		ExternalJobID     uuid.UUID `toml:"externalJobID"`
+		FluxMonitorSpecID *int32
+		FluxMonitorSpec   *FluxMonitorSpec
+		PipelineSpecID    int32
+		PipelineSpec      *pipeline.Spec
+	}
+
+	fmSpec := FluxMonitorSpec{
 		MinPayment:        assets.NewLink(100),
 		ContractAddress:   cltest.NewEIP55Address(),
 		PollTimerDisabled: true,
@@ -176,7 +206,7 @@ func TestMigrate_ChangeJobsToNumeric(t *testing.T) {
 	require.NoError(t, orm.DB.Find(&js, "id = ?", jobSpec.ID).Error)
 	require.Equal(t, assets.NewLink(100), js.MinPayment)
 
-	var fms job.FluxMonitorSpec
+	var fms FluxMonitorSpec
 	require.NoError(t, orm.DB.Find(&fms, "id = ?", fmSpec.ID).Error)
 	require.Equal(t, assets.NewLink(100), fms.MinPayment)
 
@@ -184,7 +214,7 @@ func TestMigrate_ChangeJobsToNumeric(t *testing.T) {
 }
 
 func TestMigrate_PipelineTaskRunDotID(t *testing.T) {
-	_, orm, cleanup := cltest.BootstrapThrowawayORM(t, "migrations_task_run_dot_id", false)
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_task_run_dot_id", false)
 	defer cleanup()
 
 	require.NoError(t, migrations.MigrateUp(orm.DB, "0015_simplify_log_broadcaster"))
@@ -210,7 +240,22 @@ func TestMigrate_PipelineTaskRunDotID(t *testing.T) {
 	}
 	require.NoError(t, orm.DB.Create(&ds).Error)
 	// Add a pipeline run
-	pr := pipeline.Run{
+	type PipelineRun struct {
+		ID             int64                     `json:"-" gorm:"primary_key"`
+		PipelineSpecID int32                     `json:"-"`
+		PipelineSpec   pipeline.Spec             `json:"pipelineSpec"`
+		Meta           pipeline.JSONSerializable `json:"meta"`
+		// The errors are only ever strings
+		// DB example: [null, null, "my error"]
+		Errors pipeline.RunErrors `json:"errors" gorm:"type:jsonb"`
+		// The outputs can be anything.
+		// DB example: [1234, {"a": 10}, null]
+		Outputs          pipeline.JSONSerializable `json:"outputs" gorm:"type:jsonb"`
+		CreatedAt        time.Time                 `json:"createdAt"`
+		FinishedAt       *time.Time                `json:"finishedAt"`
+		PipelineTaskRuns []pipeline.TaskRun        `json:"taskRuns" gorm:"foreignkey:PipelineRunID;->"`
+	}
+	pr := PipelineRun{
 		PipelineSpecID: ps.ID,
 		Meta:           pipeline.JSONSerializable{},
 		Errors:         pipeline.RunErrors{},
@@ -222,7 +267,7 @@ func TestMigrate_PipelineTaskRunDotID(t *testing.T) {
 	type PipelineTaskRun struct {
 		ID                 int64                      `json:"-" gorm:"primary_key"`
 		Type               pipeline.TaskType          `json:"type"`
-		PipelineRun        pipeline.Run               `json:"-"`
+		PipelineRun        PipelineRun                `json:"-"`
 		PipelineRunID      int64                      `json:"-"`
 		Output             *pipeline.JSONSerializable `json:"output" gorm:"type:jsonb"`
 		Error              null.String                `json:"error"`
@@ -249,8 +294,20 @@ func TestMigrate_PipelineTaskRunDotID(t *testing.T) {
 	require.NoError(t, orm.DB.Create(&tr2).Error)
 
 	require.NoError(t, migrations.MigrateUp(orm.DB, "0016_pipeline_task_run_dot_id"))
-	var ptrs []pipeline.TaskRun
-	require.NoError(t, orm.DB.Find(&ptrs).Error)
+	type NewPipelineTaskRun struct {
+		ID            int64                      `json:"-" gorm:"primary_key"`
+		Type          pipeline.TaskType          `json:"type"`
+		PipelineRun   PipelineRun                `json:"-"`
+		PipelineRunID int64                      `json:"-"`
+		Output        *pipeline.JSONSerializable `json:"output" gorm:"type:jsonb"`
+		Error         null.String                `json:"error"`
+		CreatedAt     time.Time                  `json:"createdAt"`
+		FinishedAt    *time.Time                 `json:"finishedAt"`
+		Index         int32
+		DotID         string `json:"dotId"`
+	}
+	var ptrs []NewPipelineTaskRun
+	require.NoError(t, orm.DB.Table("pipeline_task_runs").Find(&ptrs).Error)
 	assert.Equal(t, "__result__", ptrs[0].DotID)
 	assert.Equal(t, "ds1", ptrs[1].DotID)
 
@@ -259,7 +316,7 @@ func TestMigrate_PipelineTaskRunDotID(t *testing.T) {
 }
 
 func TestMigrate_RemoveResultTask(t *testing.T) {
-	_, orm, cleanup := cltest.BootstrapThrowawayORM(t, "migrations_result_task", false)
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_result_task", false)
 	defer cleanup()
 
 	require.NoError(t, migrations.MigrateUp(orm.DB, "0019_last_run_height_column_to_keeper_table"))
@@ -269,14 +326,41 @@ func TestMigrate_RemoveResultTask(t *testing.T) {
 	}
 	require.NoError(t, orm.DB.Create(&ps).Error)
 	// Add a pipeline run
-	pr := pipeline.Run{
+	type PipelineRun struct {
+		ID             int64                     `json:"-" gorm:"primary_key"`
+		PipelineSpecID int32                     `json:"-"`
+		PipelineSpec   pipeline.Spec             `json:"pipelineSpec"`
+		Meta           pipeline.JSONSerializable `json:"meta"`
+		// The errors are only ever strings
+		// DB example: [null, null, "my error"]
+		Errors pipeline.RunErrors `json:"errors" gorm:"type:jsonb"`
+		// The outputs can be anything.
+		// DB example: [1234, {"a": 10}, null]
+		Outputs          pipeline.JSONSerializable `json:"outputs" gorm:"type:jsonb"`
+		CreatedAt        time.Time                 `json:"createdAt"`
+		FinishedAt       *time.Time                `json:"finishedAt"`
+		PipelineTaskRuns []pipeline.TaskRun        `json:"taskRuns" gorm:"foreignkey:PipelineRunID;->"`
+	}
+	pr := PipelineRun{
 		PipelineSpecID: ps.ID,
 		Meta:           pipeline.JSONSerializable{},
 		Errors:         pipeline.RunErrors{},
 		Outputs:        pipeline.JSONSerializable{Null: true},
 	}
+	type PipelineTaskRun struct {
+		ID            int64                      `json:"-" gorm:"primary_key"`
+		Type          pipeline.TaskType          `json:"type"`
+		PipelineRun   PipelineRun                `json:"-"`
+		PipelineRunID int64                      `json:"-"`
+		Output        *pipeline.JSONSerializable `json:"output" gorm:"type:jsonb"`
+		Error         null.String                `json:"error"`
+		CreatedAt     time.Time                  `json:"createdAt"`
+		FinishedAt    *time.Time                 `json:"finishedAt"`
+		DotID         string                     `json:"dotId"`
+		Index         int32
+	}
 	require.NoError(t, orm.DB.Create(&pr).Error)
-	tr1 := pipeline.TaskRun{
+	tr1 := PipelineTaskRun{
 		Type:          pipeline.TaskTypeAny,
 		DotID:         "any",
 		PipelineRunID: pr.ID,
@@ -285,7 +369,7 @@ func TestMigrate_RemoveResultTask(t *testing.T) {
 	}
 	require.NoError(t, orm.DB.Create(&tr1).Error)
 	f := time.Now()
-	tr2 := pipeline.TaskRun{
+	tr2 := PipelineTaskRun{
 		Type:          "result",
 		DotID:         "result",
 		PipelineRunID: pr.ID,
@@ -296,7 +380,7 @@ func TestMigrate_RemoveResultTask(t *testing.T) {
 	require.NoError(t, orm.DB.Create(&tr2).Error)
 
 	require.NoError(t, migrations.MigrateUp(orm.DB, "0020_remove_result_task"))
-	var ptrs []pipeline.TaskRun
+	var ptrs []PipelineTaskRun
 	require.NoError(t, orm.DB.Find(&ptrs).Error)
 	assert.Equal(t, 1, len(ptrs))
 
@@ -304,7 +388,7 @@ func TestMigrate_RemoveResultTask(t *testing.T) {
 }
 
 func TestMigrate_LogConfigTables(t *testing.T) {
-	_, orm, cleanup := cltest.BootstrapThrowawayORM(t, "migrations_create_log_config_tables", false)
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_create_log_config_tables", false)
 	defer cleanup()
 
 	require.NoError(t, migrations.MigrateUp(orm.DB, "0025_create_log_config_table"))
@@ -336,16 +420,110 @@ func TestMigrate_LogConfigTables(t *testing.T) {
 }
 
 func TestMigrate_CreateCronTables(t *testing.T) {
-	_, orm, cleanup := cltest.BootstrapThrowawayORM(t, "migrations_create_cron_tables", false)
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_create_cron_tables", false)
 	defer cleanup()
 
 	require.NoError(t, migrations.MigrateUp(orm.DB, "0024_add_cron_spec_tables"))
 
-	cs := job.CronSpec{
+	type CronSpec struct {
+		ID           int32     `toml:"-" gorm:"primary_key"`
+		CronSchedule string    `toml:"schedule"`
+		CreatedAt    time.Time `toml:"-"`
+		UpdatedAt    time.Time `toml:"-"`
+	}
+
+	cs := CronSpec{
 		ID:           int32(1),
 		CronSchedule: "0 0 0 1 1 *",
 	}
 	require.NoError(t, orm.DB.Create(&cs).Error)
 	require.NoError(t, orm.DB.Find(&cs).Error)
 	require.NoError(t, migrations.MigrateDownFrom(orm.DB, "0024_add_cron_spec_tables"))
+}
+
+type WebhookSpec struct {
+	ID               int32     `toml:"-" gorm:"primary_key"`
+	CreatedAt        time.Time `json:"createdAt" toml:"-"`
+	UpdatedAt        time.Time `json:"updatedAt" toml:"-"`
+	OnChainJobSpecID uuid.UUID
+}
+
+func TestMigrate_CreateWebhookTables(t *testing.T) {
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_create_webhook_tables", false)
+	defer cleanup()
+
+	require.NoError(t, migrations.MigrateUp(orm.DB, "0029_add_webhook_spec_tables"))
+
+	cs := WebhookSpec{
+		ID:               int32(1),
+		OnChainJobSpecID: uuid.FromStringOrNil("0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F8179800"),
+	}
+	require.NoError(t, orm.DB.Create(&cs).Error)
+	require.NoError(t, orm.DB.Find(&cs).Error)
+	require.NoError(t, migrations.MigrateDownFrom(orm.DB, "0029_add_webhook_spec_tables"))
+}
+
+func TestMigrate_ExternalJobID(t *testing.T) {
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_external_jobid", false)
+	defer cleanup()
+	require.NoError(t, migrations.MigrateUp(orm.DB, "0035_create_feeds_managers"))
+	cs := WebhookSpec{
+		ID:               int32(1),
+		OnChainJobSpecID: uuid.FromStringOrNil("0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F8179800"),
+	}
+	require.NoError(t, orm.DB.Create(&cs).Error)
+	type Job struct {
+		ID                            int32 `toml:"-" gorm:"primary_key"`
+		OffchainreportingOracleSpecID *int32
+		CronSpecID                    *int32
+		DirectRequestSpecID           *int32
+		FluxMonitorSpecID             *int32
+		KeeperSpecID                  *int32
+		VRFSpecID                     *int32
+		WebhookSpecId                 *int32
+		PipelineSpecID                int32
+		PipelineSpec                  *pipeline.Spec
+		JobSpecErrors                 []job.SpecError `gorm:"foreignKey:JobID"`
+		Type                          job.Type
+		SchemaVersion                 uint32
+		Name                          null.String
+		MaxTaskDuration               models.Interval
+		Pipeline                      pipeline.Pipeline `toml:"observationSource" gorm:"-"`
+	}
+	var ps []pipeline.Spec
+	for i := 0; i < 10; i++ {
+		ps = append(ps, pipeline.Spec{
+			DotDagSource: "",
+		})
+	}
+	require.NoError(t, orm.DB.Create(&ps).Error)
+	var jbs []Job
+	for i := 0; i < 10; i++ {
+		jbs = append(jbs, Job{
+			SchemaVersion:  1,
+			WebhookSpecId:  &cs.ID,
+			PipelineSpecID: ps[i].ID,
+			Type:           job.Webhook,
+		})
+	}
+	require.NoError(t, orm.DB.Create(&jbs).Error)
+	require.NoError(t, migrations.MigrateUp(orm.DB, "0036_external_job_id"))
+	var jb2 []migrations.Job36
+	require.NoError(t, orm.DB.Find(&jb2).Error)
+	var seen = make(map[uuid.UUID]struct{})
+	for i := range jb2 {
+		if _, ok := seen[jb2[i].ExternalJobID]; ok {
+			t.Error("all uuid's should be unique")
+		}
+		assert.NotEqual(t, uuid.UUID{}.String(), jb2[i].ExternalJobID.String())
+		t.Log(jb2[i].ExternalJobID.String())
+	}
+	require.NoError(t, migrations.MigrateDownFrom(orm.DB, "0036_external_job_id"))
+}
+
+func TestMigrate_CascadeDeletes(t *testing.T) {
+	_, orm, cleanup := heavyweight.FullTestORM(t, "migrations_cascade_deletes", false)
+	t.Cleanup(cleanup)
+	require.NoError(t, migrations.MigrateUp(orm.DB, "0037_cascade_deletes"))
+	require.NoError(t, migrations.MigrateDownFrom(orm.DB, "0037_cascade_deletes"))
 }

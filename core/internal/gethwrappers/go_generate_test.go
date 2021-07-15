@@ -21,10 +21,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const compileCommand = "../../../evm-contracts/scripts/native_solc_compile_all"
+const compileCommand = "../../../contracts/scripts/native_solc_compile_all"
 
 // TestCheckContractHashesFromLastGoGenerate compares the abi and bytecode of the
-// contract artifacts in evm-contracts/solc with the abi and bytecode stored in the
+// contract artifacts in contracts/solc with the abi and bytecode stored in the
 // contract wrapper
 func TestCheckContractHashesFromLastGoGenerate(t *testing.T) {
 	versions, err := ReadVersionsDB()

@@ -18,6 +18,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smartcontractkit/chainlink/core/chains"
+	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
+	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/p2pkey"
 	"github.com/smartcontractkit/chainlink/core/static"
 	"github.com/smartcontractkit/chainlink/core/store/dialects"
 
@@ -25,6 +28,7 @@ import (
 
 	"github.com/multiformats/go-multiaddr"
 
+	ocrnetworking "github.com/smartcontractkit/libocr/networking"
 	ocr "github.com/smartcontractkit/libocr/offchainreporting"
 	ocrtypes "github.com/smartcontractkit/libocr/offchainreporting/types"
 
@@ -36,7 +40,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	ethCore "github.com/ethereum/go-ethereum/core"
 	"github.com/gin-gonic/contrib/sessions"
-	"github.com/gin-gonic/gin"
 	"github.com/gorilla/securecookie"
 	homedir "github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
@@ -52,11 +55,6 @@ var (
 	ErrInvalid = errors.New("env var invalid")
 
 	configFileNotFoundError = reflect.TypeOf(viper.ConfigFileNotFoundError{})
-
-	// keyed by ChainID
-	ChainSpecificDefaults map[int64]ChainSpecificDefaultSet
-	// If the chain is unknown, fallback to the general defaults
-	GeneralDefaults ChainSpecificDefaultSet
 )
 
 type (
@@ -73,162 +71,12 @@ type (
 		randomP2PPortMtx *sync.RWMutex
 		Dialect          dialects.DialectName
 		AdvisoryLockID   int64
-	}
-
-	// ChainSpecificDefaultSet us a list of defaults specific to a particular chain ID
-	ChainSpecificDefaultSet struct {
-		EnableLegacyJobPipeline          bool
-		EthGasBumpThreshold              uint64
-		EthGasBumpWei                    *big.Int
-		EthGasPriceDefault               *big.Int
-		EthMaxGasPriceWei                *big.Int
-		EthMinGasPriceWei                *big.Int
-		EthFinalityDepth                 uint
-		EthHeadTrackerHistoryDepth       uint
-		EthHeadTrackerSamplingInterval   time.Duration
-		EthBalanceMonitorBlockDelay      uint16
-		EthTxResendAfterThreshold        time.Duration
-		GasUpdaterBatchSize              *uint32
-		GasUpdaterBlockDelay             uint16
-		GasUpdaterBlockHistorySize       uint16
-		GasUpdaterEnabled                bool
-		HeadTimeBudget                   time.Duration
-		MinIncomingConfirmations         uint32
-		MinRequiredOutgoingConfirmations uint64
-		OptimismGasFees                  bool
+		// keystorePassword string
 	}
 )
 
-func init() {
-	ChainSpecificDefaults = make(map[int64]ChainSpecificDefaultSet)
-	// FIXME: Workaround `websocket: read limit exceeded` until https://app.clubhouse.io/chainlinklabs/story/6717/geth-websockets-can-sometimes-go-bad-under-heavy-load-proposal-for-eth-node-balancer
-	var defaultGasUpdaterBatchSize uint32 = 4
-
-	mainnet := ChainSpecificDefaultSet{
-		EnableLegacyJobPipeline:          true,
-		EthGasBumpThreshold:              3,
-		EthGasBumpWei:                    big.NewInt(5000000000),    // 5 Gwei
-		EthGasPriceDefault:               big.NewInt(20000000000),   // 20 Gwei
-		EthMaxGasPriceWei:                big.NewInt(1500000000000), // 1.5 Twei
-		EthMinGasPriceWei:                big.NewInt(1000000000),    // 1 Gwei
-		EthFinalityDepth:                 50,
-		EthHeadTrackerHistoryDepth:       100,
-		EthHeadTrackerSamplingInterval:   1 * time.Second,
-		EthBalanceMonitorBlockDelay:      1,
-		EthTxResendAfterThreshold:        30 * time.Second,
-		GasUpdaterBlockDelay:             1,
-		GasUpdaterBlockHistorySize:       24,
-		GasUpdaterBatchSize:              &defaultGasUpdaterBatchSize,
-		GasUpdaterEnabled:                true,
-		HeadTimeBudget:                   13 * time.Second,
-		MinIncomingConfirmations:         3,
-		MinRequiredOutgoingConfirmations: 12,
-	}
-
-	// NOTE: There are probably other variables we can tweak for Kovan and other
-	// test chains, but requires more in-depth research on their consensus
-	// mechanisms. For now, mainnet defaults ought to be safe enough for testnet.
-	kovan := mainnet
-	kovan.HeadTimeBudget = 4 * time.Second
-
-	// xDai currently uses AuRa (like Parity) consensus so finality rules will be similar to parity
-	// See: https://www.poa.network/for-users/whitepaper/poadao-v1/proof-of-authority
-	// NOTE: xDai is planning to move to Honeybadger BFT which might have different finality guarantees
-	// https://www.xdaichain.com/for-validators/consensus/honeybadger-bft-consensus
-	// For worst case re-org depth on AuRa, assume 2n+2 (see: https://github.com/poanetwork/wiki/wiki/Aura-Consensus-Protocol-Audit)
-	// With xDai's current maximum of 19 validators then 40 blocks is the maximum possible re-org)
-	// The mainnet default of 50 blocks is ok here
-	xDai := mainnet
-	xDai.EthGasBumpThreshold = 8                      // mainnet * 2.8 ish (5s vs 13s block time)
-	xDai.EthGasPriceDefault = big.NewInt(1000000000)  // 1 Gwei
-	xDai.EthMinGasPriceWei = big.NewInt(1000000000)   // 1 Gwei is the minimum accepted by the validators (unless whitelisted)
-	xDai.EthMaxGasPriceWei = big.NewInt(500000000000) // 500 Gwei
-	xDai.HeadTimeBudget = 5 * time.Second
-
-	// BSC uses Clique consensus with ~3s block times
-	// Clique offers finality within (N/2)+1 blocks where N is number of signers
-	// There are 21 BSC validators so theoretically finality should occur after 21/2+1 = 11 blocks
-	bscMainnet := ChainSpecificDefaultSet{
-		EnableLegacyJobPipeline:          true,
-		EthGasBumpThreshold:              12,                       // mainnet * 4 (3s vs 13s block time)
-		EthGasBumpWei:                    big.NewInt(5000000000),   // 5 Gwei
-		EthGasPriceDefault:               big.NewInt(5000000000),   // 5 Gwei
-		EthMaxGasPriceWei:                big.NewInt(500000000000), // 500 Gwei
-		EthFinalityDepth:                 50,                       // Keeping this >> 11 because it's not expensive and gives us a safety margin
-		EthHeadTrackerHistoryDepth:       100,
-		EthHeadTrackerSamplingInterval:   1 * time.Second,
-		EthBalanceMonitorBlockDelay:      2,
-		EthTxResendAfterThreshold:        15 * time.Second,
-		GasUpdaterBlockDelay:             2,
-		GasUpdaterBlockHistorySize:       24,
-		GasUpdaterBatchSize:              &defaultGasUpdaterBatchSize,
-		GasUpdaterEnabled:                true,
-		HeadTimeBudget:                   3 * time.Second,
-		MinIncomingConfirmations:         3,
-		MinRequiredOutgoingConfirmations: 12,
-	}
-
-	hecoMainnet := bscMainnet
-
-	// Matic has a 1s block time and looser finality guarantees than Ethereum.
-	polygonMatic := ChainSpecificDefaultSet{
-		EnableLegacyJobPipeline:          true,
-		EthGasBumpThreshold:              39,                       // mainnet * 13
-		EthGasBumpWei:                    big.NewInt(5000000000),   // 5 Gwei
-		EthGasPriceDefault:               big.NewInt(1000000000),   // 1 Gwei
-		EthMaxGasPriceWei:                big.NewInt(500000000000), // 500 Gwei
-		EthFinalityDepth:                 200,                      // A sprint is 64 blocks long and doesn't guarantee finality. To be safe, we take three sprints (192 blocks) plus a safety margin
-		EthHeadTrackerHistoryDepth:       250,                      // EthFinalityDepth + safety margin
-		EthHeadTrackerSamplingInterval:   1 * time.Second,
-		EthBalanceMonitorBlockDelay:      13,              // equivalent of 1 eth block seems reasonable
-		EthTxResendAfterThreshold:        5 * time.Minute, // 5 minutes is roughly 300 blocks on Matic. Since re-orgs occur often and can be deep, we want to avoid overloading the node with a ton of re-sent unconfirmed transactions.
-		GasUpdaterBlockDelay:             32,              // Delay needs to be large on matic since re-orgs are so frequent at the top level
-		GasUpdaterBlockHistorySize:       128,
-		GasUpdaterBatchSize:              &defaultGasUpdaterBatchSize,
-		GasUpdaterEnabled:                true,
-		HeadTimeBudget:                   1 * time.Second,
-		MinIncomingConfirmations:         39, // mainnet * 13 (1s vs 13s block time)
-		MinRequiredOutgoingConfirmations: 39, // mainnet * 13
-	}
-
-	// Optimism is an L2 chain. Pending proper L2 support, for now we rely on Optimism's sequencer
-	optimism := ChainSpecificDefaultSet{
-		EnableLegacyJobPipeline:          false,
-		EthGasBumpThreshold:              0, // Never bump gas on optimism
-		EthFinalityDepth:                 1, // Sequencer offers absolute finality as long as no re-org longer than 20 blocks occurs on main chain, this event would require special handling (new txm)
-		EthHeadTrackerHistoryDepth:       10,
-		EthHeadTrackerSamplingInterval:   1 * time.Second,
-		EthBalanceMonitorBlockDelay:      0,
-		EthTxResendAfterThreshold:        5 * time.Second,
-		GasUpdaterBlockHistorySize:       0, // Force an error if someone set GAS_UPDATER_ENABLED=true by accident; we never want to run the gas updater on optimism
-		GasUpdaterEnabled:                false,
-		HeadTimeBudget:                   100 * time.Millisecond, // Actually heads on Optimism happen every time a transaction is sent so it could be much more frequent than this. Will need to observe in practice how rapid they are and maybe implement special casing
-		MinIncomingConfirmations:         1,
-		MinRequiredOutgoingConfirmations: 0,
-		OptimismGasFees:                  true,
-	}
-
-	GeneralDefaults = mainnet
-	ChainSpecificDefaults[1] = mainnet
-	ChainSpecificDefaults[42] = kovan
-
-	ChainSpecificDefaults[10] = optimism
-	ChainSpecificDefaults[69] = optimism
-	ChainSpecificDefaults[420] = optimism
-
-	ChainSpecificDefaults[56] = bscMainnet
-	ChainSpecificDefaults[128] = hecoMainnet
-	ChainSpecificDefaults[80001] = polygonMatic
-
-	ChainSpecificDefaults[100] = xDai
-}
-
-func chainSpecificConfig(c Config) ChainSpecificDefaultSet {
-	chainID := c.ChainID().Int64()
-	if cset, exists := ChainSpecificDefaults[chainID]; exists {
-		return cset
-	}
-	return GeneralDefaults
+func chainSpecificConfig(c Config) chains.ChainSpecificConfig {
+	return c.Chain().Config()
 }
 
 // NewConfig returns the config with the environment variables set to their
@@ -249,6 +97,10 @@ func newConfigWithViper(v *viper.Viper) *Config {
 		}
 		_ = v.BindEnv(name, name)
 	}
+
+	// TODO: Remove when implementing
+	// https://app.clubhouse.io/chainlinklabs/story/8096/fully-deprecate-minimum-contract-payment
+	_ = v.BindEnv("MINIMUM_CONTRACT_PAYMENT")
 
 	config := &Config{
 		viper:            v,
@@ -282,6 +134,9 @@ func (c *Config) Validate() error {
 		)
 	}
 
+	if uint32(c.EthGasBumpTxDepth()) > c.EthMaxInFlightTransactions() {
+		return errors.New("ETH_GAS_BUMP_TX_DEPTH must be less than or equal to ETH_MAX_IN_FLIGHT_TRANSACTIONS")
+	}
 	if c.EthMinGasPriceWei().Cmp(c.EthGasPriceDefault()) > 0 {
 		return errors.New("ETH_MIN_GAS_PRICE_WEI must be less than or equal to ETH_GAS_PRICE_DEFAULT")
 	}
@@ -293,8 +148,8 @@ func (c *Config) Validate() error {
 		return errors.New("ETH_HEAD_TRACKER_HISTORY_DEPTH must be equal to or greater than ETH_FINALITY_DEPTH")
 	}
 
-	if c.GasUpdaterEnabled() && c.GasUpdaterBlockHistorySize() <= 0 {
-		return errors.New("GAS_UPDATER_BLOCK_HISTORY_SIZE must be greater than or equal to 1 if gas updater is enabled")
+	if c.GasEstimatorMode() == "BlockHistory" && c.BlockHistoryEstimatorBlockHistorySize() <= 0 {
+		return errors.New("GAS_UPDATER_BLOCK_HISTORY_SIZE must be greater than or equal to 1 if block history estimator is enabled")
 	}
 
 	if c.P2PAnnouncePort() != 0 && c.P2PAnnounceIP() == nil {
@@ -307,6 +162,12 @@ func (c *Config) Validate() error {
 
 	if c.MinIncomingConfirmations() < 1 {
 		return errors.New("MIN_INCOMING_CONFIRMATIONS must be greater than or equal to 1")
+	}
+
+	// TODO: Remove when implementing
+	// https://app.clubhouse.io/chainlinklabs/story/8096/fully-deprecate-minimum-contract-payment
+	if c.viper.IsSet("MINIMUM_CONTRACT_PAYMENT") {
+		logger.Warn("MINIMUM_CONTRACT_PAYMENT is now deprecated and will be removed from a future release, use MINIMUM_CONTRACT_PAYMENT_LINK_JUELS instead.")
 	}
 
 	var override time.Duration
@@ -411,7 +272,7 @@ func (c Config) AuthenticatedRateLimitPeriod() models.Duration {
 
 // BalanceMonitorEnabled enables the balance monitor
 func (c Config) BalanceMonitorEnabled() bool {
-	return c.viper.GetBool(EnvVarName("BalanceMonitorEnabled"))
+	return !c.EthereumDisabled() && c.viper.GetBool(EnvVarName("BalanceMonitorEnabled"))
 }
 
 // BlockBackfillDepth specifies the number of blocks before the current HEAD that the
@@ -428,6 +289,10 @@ func (c Config) BridgeResponseURL() *url.URL {
 // ChainID represents the chain ID to use for transactions.
 func (c Config) ChainID() *big.Int {
 	return c.getWithFallback("ChainID", parseBigInt).(*big.Int)
+}
+
+func (c Config) Chain() *chains.Chain {
+	return chains.ChainFromID(c.ChainID())
 }
 
 // ClientNodeURL is the URL of the Ethereum node this Chainlink node should connect to.
@@ -558,19 +423,30 @@ func (c Config) FeatureExternalInitiators() bool {
 	return c.viper.GetBool(EnvVarName("FeatureExternalInitiators"))
 }
 
-// FeatureFluxMonitor enables the Flux Monitor feature.
+// FeatureFluxMonitor enables the Flux Monitor job type.
 func (c Config) FeatureFluxMonitor() bool {
 	return c.viper.GetBool(EnvVarName("FeatureFluxMonitor"))
 }
 
-// FeatureFluxMonitorV2 enables the Flux Monitor v2 feature.
+// FeatureFluxMonitorV2 enables the Flux Monitor v2 job type.
 func (c Config) FeatureFluxMonitorV2() bool {
 	return c.getWithFallback("FeatureFluxMonitorV2", parseBool).(bool)
 }
 
-// FeatureOffchainReporting enables the Flux Monitor feature.
+// FeatureOffchainReporting enables the Flux Monitor job type.
 func (c Config) FeatureOffchainReporting() bool {
 	return c.viper.GetBool(EnvVarName("FeatureOffchainReporting"))
+}
+
+// FeatureWebhookV2 enables the Webhook v2 job type
+func (c Config) FeatureWebhookV2() bool {
+	return c.getWithFallback("FeatureWebhookV2", parseBool).(bool)
+}
+
+// FMDefaultTransactionQueueDepth controls the queue size for DropOldestStrategy in Flux Monitor
+// Set to 0 to use SendEvery strategy instead
+func (c Config) FMDefaultTransactionQueueDepth() uint32 {
+	return c.viper.GetUint32(EnvVarName("FMDefaultTransactionQueueDepth"))
 }
 
 // MaximumServiceDuration is the maximum time that a service agreement can run
@@ -637,7 +513,18 @@ func (c Config) EthGasBumpWei() *big.Int {
 			return n.(*big.Int)
 		}
 	}
-	return chainSpecificConfig(c).EthGasBumpWei
+	n := chainSpecificConfig(c).EthGasBumpWei
+	return &n
+}
+
+// EthMaxInFlightTransactions controls how many transactions are allowed to be
+// "in-flight" i.e. broadcast but unconfirmed at any one time
+// 0 value disables the limit
+func (c Config) EthMaxInFlightTransactions() uint32 {
+	if c.viper.IsSet(EnvVarName("EthMaxInFlightTransactions")) {
+		return c.viper.GetUint32(EnvVarName("EthMaxInFlightTransactions"))
+	}
+	return chainSpecificConfig(c).EthMaxInFlightTransactions
 }
 
 // EthMaxGasPriceWei is the maximum amount in Wei that a transaction will be
@@ -655,15 +542,19 @@ func (c Config) EthMaxGasPriceWei() *big.Int {
 			return n.(*big.Int)
 		}
 	}
-	return chainSpecificConfig(c).EthMaxGasPriceWei
+	n := chainSpecificConfig(c).EthMaxGasPriceWei
+	return &n
 }
 
-// EthMaxUnconfirmedTransactions is the maximum number of unconfirmed
-// transactions per key that are allowed to be in flight before jobs will start
+// EthMaxQueuedTransactions is the maximum number of unbroadcast
+// transactions per key that are allowed to be enqueued before jobs will start
 // failing and rejecting send of any further transactions.
 // 0 value disables
-func (c Config) EthMaxUnconfirmedTransactions() uint64 {
-	return c.getWithFallback("EthMaxUnconfirmedTransactions", parseUint64).(uint64)
+func (c Config) EthMaxQueuedTransactions() uint64 {
+	if c.viper.IsSet(EnvVarName("EthMaxQueuedTransactions")) {
+		return c.viper.GetUint64(EnvVarName("EthMaxQueuedTransactions"))
+	}
+	return chainSpecificConfig(c).EthMaxQueuedTransactions
 }
 
 // EthMinGasPriceWei is the minimum amount in Wei that a transaction may be priced.
@@ -681,7 +572,8 @@ func (c Config) EthMinGasPriceWei() *big.Int {
 			return n.(*big.Int)
 		}
 	}
-	return chainSpecificConfig(c).EthMinGasPriceWei
+	n := chainSpecificConfig(c).EthMinGasPriceWei
+	return &n
 }
 
 // EthNonceAutoSync enables/disables running the NonceSyncer on application start
@@ -691,7 +583,18 @@ func (c Config) EthNonceAutoSync() bool {
 
 // EthGasLimitDefault sets the default gas limit for outgoing transactions.
 func (c Config) EthGasLimitDefault() uint64 {
-	return c.getWithFallback("EthGasLimitDefault", parseUint64).(uint64)
+	if c.viper.IsSet(EnvVarName("EthGasLimitDefault")) {
+		return c.viper.GetUint64(EnvVarName("EthGasLimitDefault"))
+	}
+	return chainSpecificConfig(c).EthGasLimitDefault
+}
+
+// EthGasLimitTransfer is the gas limit for an ordinary eth->eth transfer
+func (c Config) EthGasLimitTransfer() uint64 {
+	if c.viper.IsSet(EnvVarName("EthGasLimitTransfer")) {
+		return c.viper.GetUint64(EnvVarName("EthGasLimitTransfer"))
+	}
+	return chainSpecificConfig(c).EthGasLimitTransfer
 }
 
 // EthGasPriceDefault is the starting gas price for every transaction
@@ -716,10 +619,11 @@ func (c Config) EthGasPriceDefault() *big.Int {
 			return n.(*big.Int)
 		}
 	}
-	return chainSpecificConfig(c).EthGasPriceDefault
+	n := chainSpecificConfig(c).EthGasPriceDefault
+	return &n
 }
 
-// EthGasLimitMultiplier is a factory by which a transaction's GasLimit is
+// EthGasLimitMultiplier is a factor by which a transaction's GasLimit is
 // multiplied before transmission. So if the value is 1.1, and the GasLimit for
 // a transaction is 10, 10% will be added before transmission.
 //
@@ -913,62 +817,97 @@ func (c Config) FlagsContractAddress() string {
 	return c.viper.GetString(EnvVarName("FlagsContractAddress"))
 }
 
-// GasUpdaterBatchSize sets the maximum number of blocks to fetch in one batch in the gas updater
-// If the env var GAS_UPDATER_BATCH_SIZE is unset, it defaults to ETH_RPC_DEFAULT_BATCH_SIZE
-func (c Config) GasUpdaterBatchSize() uint32 {
-	if c.viper.IsSet(EnvVarName("GasUpdaterBatchSize")) {
-		return c.viper.GetUint32(EnvVarName("GasUpdaterBatchSize"))
+// BlockHistoryEstimatorBatchSize sets the maximum number of blocks to fetch in one batch in the block history estimator
+// If the env var GAS_UPDATER_BATCH_SIZE is set to 0, it defaults to ETH_RPC_DEFAULT_BATCH_SIZE
+func (c Config) BlockHistoryEstimatorBatchSize() (size uint32) {
+	if c.viper.IsSet(EnvVarName("BlockHistoryEstimatorBatchSize")) {
+		size = c.viper.GetUint32(EnvVarName("BlockHistoryEstimatorBatchSize"))
+	} else if c.viper.IsSet("GAS_UPDATER_BATCH_SIZE") {
+		logger.Warn("GAS_UPDATER_BATCH_SIZE is deprecated, please use BLOCK_HISTORY_ESTIMATOR_BATCH_SIZE instead")
+		size = c.viper.GetUint32("GAS_UPDATER_BATCH_SIZE")
+	} else {
+		size = chainSpecificConfig(c).BlockHistoryEstimatorBatchSize
 	}
-	defaultGasUpdaterBatchSize := chainSpecificConfig(c).GasUpdaterBatchSize
-	if defaultGasUpdaterBatchSize != nil {
-		return *defaultGasUpdaterBatchSize
+	if size > 0 {
+		return size
 	}
 	return c.EthRPCDefaultBatchSize()
 }
 
-// GasUpdaterBlockDelay is the number of blocks that the gas updater trails behind head.
-// E.g. if this is set to 3, and we receive block 10, gas updater will
+// BlockHistoryEstimatorBlockDelay is the number of blocks that the block history estimator trails behind head.
+// E.g. if this is set to 3, and we receive block 10, block history estimator will
 // fetch block 7.
 // CAUTION: You might be tempted to set this to 0 to use the latest possible
 // block, but it is possible to receive a head BEFORE that block is actually
 // available from the connected node via RPC. In this case you will get false
 // "zero" blocks that are missing transactions.
-func (c Config) GasUpdaterBlockDelay() uint16 {
-	if c.viper.IsSet(EnvVarName("GasUpdaterBlockDelay")) {
-		return uint16(c.viper.GetUint32(EnvVarName("GasUpdaterBlockDelay")))
+func (c Config) BlockHistoryEstimatorBlockDelay() uint16 {
+	if c.viper.IsSet(EnvVarName("BlockHistoryEstimatorBlockDelay")) {
+		return uint16(c.viper.GetUint32(EnvVarName("BlockHistoryEstimatorBlockDelay")))
+	} else if c.viper.IsSet("GAS_UPDATER_BLOCK_DELAY") {
+		logger.Warn("GAS_UPDATER_BLOCK_DELAY is deprecated, please use BLOCK_HISTORY_ESTIMATOR_BLOCK_DELAY instead")
+		return uint16(c.viper.GetUint32("GAS_UPDATER_BLOCK_DELAY"))
 	}
-	return chainSpecificConfig(c).GasUpdaterBlockDelay
+	return chainSpecificConfig(c).BlockHistoryEstimatorBlockDelay
 }
 
-// GasUpdaterBlockHistorySize is the number of past blocks to keep in memory to
+// BlockHistoryEstimatorBlockHistorySize is the number of past blocks to keep in memory to
 // use as a basis for calculating a percentile gas price
-func (c Config) GasUpdaterBlockHistorySize() uint16 {
-	if c.viper.IsSet(EnvVarName("GasUpdaterBlockHistorySize")) {
-		return uint16(c.viper.GetUint32(EnvVarName("GasUpdaterBlockHistorySize")))
+func (c Config) BlockHistoryEstimatorBlockHistorySize() uint16 {
+	if c.viper.IsSet(EnvVarName("BlockHistoryEstimatorBlockHistorySize")) {
+		return uint16(c.viper.GetUint32(EnvVarName("BlockHistoryEstimatorBlockHistorySize")))
+	} else if c.viper.IsSet("GAS_UPDATER_BLOCK_HISTORY_SIZE") {
+		logger.Warn("GAS_UPDATER_BLOCK_HISTORY_SIZE is deprecated, please use BLOCK_HISTORY_ESTIMATOR_BLOCK_HISTORY_SIZE instead")
+		return uint16(c.viper.GetUint32("GAS_UPDATER_BLOCK_HISTORY_SIZE"))
 	}
-	return chainSpecificConfig(c).GasUpdaterBlockHistorySize
+	return chainSpecificConfig(c).BlockHistoryEstimatorBlockHistorySize
 }
 
-// GasUpdaterTransactionPercentile is the percentile gas price to choose. E.g.
+// BlockHistoryEstimatorTransactionPercentile is the percentile gas price to choose. E.g.
 // if the past transaction history contains four transactions with gas prices:
 // [100, 200, 300, 400], picking 25 for this number will give a value of 200
-func (c Config) GasUpdaterTransactionPercentile() uint16 {
-	return c.getWithFallback("GasUpdaterTransactionPercentile", parseUint16).(uint16)
+func (c Config) BlockHistoryEstimatorTransactionPercentile() uint16 {
+	if c.viper.IsSet(EnvVarName("BlockHistoryEstimatorTransactionPercentile")) {
+		return uint16(c.viper.GetUint32(EnvVarName("BlockHistoryEstimatorTransactionPercentile")))
+	} else if c.viper.IsSet("GAS_UPDATER_TRANSACTION_PERCENTILE") {
+		logger.Warn("GAS_UPDATER_TRANSACTION_PERCENTILE is deprecated, please use BLOCK_HISTORY_ESTIMATOR_TRANSACTION_PERCENTILE instead")
+		return uint16(c.viper.GetUint32("GAS_UPDATER_TRANSACTION_PERCENTILE"))
+	}
+	return c.getWithFallback("BlockHistoryEstimatorTransactionPercentile", parseUint16).(uint16)
 }
 
-// GasUpdaterEnabled turns on the automatic gas updater if set to true
-// It is enabled by default on most chains
-func (c Config) GasUpdaterEnabled() bool {
-	if c.viper.IsSet(EnvVarName("GasUpdaterEnabled")) {
-		return c.viper.GetBool(EnvVarName("GasUpdaterEnabled"))
+// GasEstimatorMode controls what type of gas estimator is used
+func (c Config) GasEstimatorMode() string {
+	if c.EthereumDisabled() {
+		return "FixedPrice"
 	}
-	return chainSpecificConfig(c).GasUpdaterEnabled
+	if c.viper.IsSet(EnvVarName("GasEstimatorMode")) {
+		return c.viper.GetString(EnvVarName("GasEstimatorMode"))
+	}
+	if c.viper.IsSet("GAS_UPDATER_ENABLED") {
+		if c.viper.GetBool("GAS_UPDATER_ENABLED") {
+			logger.Warn("GAS_UPDATER_ENABLED has been deprecated, to enable the block history estimator, please use GAS_ESTIMATOR_MODE=BlockHistory instead")
+			return "BlockHistory"
+		}
+		logger.Warn("GAS_UPDATER_ENABLED has been deprecated, to disable the block history estimator, please use GAS_ESTIMATOR_MODE=FixedPrice instead")
+		return "FixedPrice"
+	}
+	return chainSpecificConfig(c).GasEstimatorMode
 }
 
 // InsecureFastScrypt causes all key stores to encrypt using "fast" scrypt params instead
 // This is insecure and only useful for local testing. DO NOT SET THIS IN PRODUCTION
 func (c Config) InsecureFastScrypt() bool {
 	return c.viper.GetBool(EnvVarName("InsecureFastScrypt"))
+}
+
+// InsecureSkipVerify disables SSL certificiate verification when connection to
+// a chainlink client using the remote client, i.e. when executing most remote
+// commands in the CLI.
+//
+// This is mostly useful for people who want to use TLS on localhost.
+func (c Config) InsecureSkipVerify() bool {
+	return c.viper.GetBool(EnvVarName("InsecureSkipVerify"))
 }
 
 func (c Config) TriggerFallbackDBPollInterval() time.Duration {
@@ -992,14 +931,38 @@ func (c Config) JobPipelineReaperThreshold() time.Duration {
 	return c.getWithFallback("JobPipelineReaperThreshold", parseDuration).(time.Duration)
 }
 
+// KeeperRegistryCheckGasOverhead is the amount of extra gas to provide checkUpkeep() calls
+// to account for the gas consumed by the keeper registry
+func (c Config) KeeperRegistryCheckGasOverhead() uint64 {
+	return c.getWithFallback("KeeperRegistryCheckGasOverhead", parseUint64).(uint64)
+}
+
+// KeeperRegistryPerformGasOverhead is the amount of extra gas to provide performUpkeep() calls
+// to account for the gas consumed by the keeper registry
+func (c Config) KeeperRegistryPerformGasOverhead() uint64 {
+	return c.getWithFallback("KeeperRegistryPerformGasOverhead", parseUint64).(uint64)
+}
+
+// KeeperDefaultTransactionQueueDepth controls the queue size for DropOldestStrategy in Keeper
+// Set to 0 to use SendEvery strategy instead
+func (c Config) KeeperDefaultTransactionQueueDepth() uint32 {
+	return c.viper.GetUint32(EnvVarName("KeeperDefaultTransactionQueueDepth"))
+}
+
+// KeeperRegistrySyncInterval is the interval in which the RegistrySynchronizer performs a full
+// sync of the keeper registry contract it is tracking
 func (c Config) KeeperRegistrySyncInterval() time.Duration {
 	return c.getWithFallback("KeeperRegistrySyncInterval", parseDuration).(time.Duration)
 }
 
+// KeeperMinimumRequiredConfirmations is the minimum number of confirmations that a keeper registry log
+// needs before it is handled by the RegistrySynchronizer
 func (c Config) KeeperMinimumRequiredConfirmations() uint64 {
 	return c.viper.GetUint64(EnvVarName("KeeperMinimumRequiredConfirmations"))
 }
 
+// KeeperMaximumGracePeriod is the maximum number of blocks that a keeper will wait after performing
+// an upkeep before it resumes checking that upkeep
 func (c Config) KeeperMaximumGracePeriod() int64 {
 	return c.viper.GetInt64(EnvVarName("KeeperMaximumGracePeriod"))
 }
@@ -1010,9 +973,13 @@ func (c Config) JSONConsole() bool {
 	return c.viper.GetBool(EnvVarName("JSONConsole"))
 }
 
-// LinkContractAddress represents the address
+// LinkContractAddress represents the address of the official LINK token
+// contract on the current Chain
 func (c Config) LinkContractAddress() string {
-	return c.viper.GetString(EnvVarName("LinkContractAddress"))
+	if c.viper.IsSet(EnvVarName("LinkContractAddress")) {
+		return c.viper.GetString(EnvVarName("LinkContractAddress"))
+	}
+	return chainSpecificConfig(c).LinkContractAddress
 }
 
 // ExplorerURL returns the websocket URL for this node to push stats to, or nil.
@@ -1079,7 +1046,10 @@ func (c Config) OCRContractConfirmations(override uint16) uint16 {
 	if override != uint16(0) {
 		return override
 	}
-	return c.getWithFallback("OCRContractConfirmations", parseUint16).(uint16)
+	if c.viper.IsSet(EnvVarName("OCRContractConfirmations")) {
+		return uint16(c.viper.GetUint32(EnvVarName("OCRContractConfirmations")))
+	}
+	return chainSpecificConfig(c).OCRContractConfirmations
 }
 
 func (c Config) OCRDatabaseTimeout() time.Duration {
@@ -1115,13 +1085,19 @@ func (c Config) OCRMonitoringEndpoint(override string) string {
 	return c.viper.GetString(EnvVarName("OCRMonitoringEndpoint"))
 }
 
-func (c Config) OCRTransmitterAddress(override *models.EIP55Address) (models.EIP55Address, error) {
+// OCRDefaultTransactionQueueDepth controls the queue size for DropOldestStrategy in OCR
+// Set to 0 to use SendEvery strategy instead
+func (c Config) OCRDefaultTransactionQueueDepth() uint32 {
+	return c.viper.GetUint32(EnvVarName("OCRDefaultTransactionQueueDepth"))
+}
+
+func (c Config) OCRTransmitterAddress(override *ethkey.EIP55Address) (ethkey.EIP55Address, error) {
 	if override != nil {
 		return *override, nil
 	}
 	taStr := c.viper.GetString(EnvVarName("OCRTransmitterAddress"))
 	if taStr != "" {
-		ta, err := models.NewEIP55Address(taStr)
+		ta, err := ethkey.NewEIP55Address(taStr)
 		if err != nil {
 			return "", errors.Wrapf(ErrInvalid, "OCR_TRANSMITTER_ADDRESS is invalid EIP55 %v", err)
 		}
@@ -1164,15 +1140,6 @@ func (c Config) OperatorContractAddress() common.Address {
 		return common.Address{}
 	}
 	return *address
-}
-
-// OptimismGasFees enables asking the network for gas price before submitting
-// transactions, enabling compatibility with Optimism's L2 chain
-func (c Config) OptimismGasFees() bool {
-	if c.viper.IsSet(EnvVarName("OptimismGasFees")) {
-		return c.viper.GetBool(EnvVarName("OptimismGasFees"))
-	}
-	return chainSpecificConfig(c).OptimismGasFees
 }
 
 // LogLevel represents the maximum level of log messages to output.
@@ -1260,7 +1227,23 @@ func (c Config) MinRequiredOutgoingConfirmations() uint64 {
 // MinimumContractPayment represents the minimum amount of LINK that must be
 // supplied for a contract to be considered.
 func (c Config) MinimumContractPayment() *assets.Link {
-	return c.getWithFallback("MinimumContractPayment", parseLink).(*assets.Link)
+	minimumContractPayment := chainSpecificConfig(c).MinimumContractPayment
+	if c.viper.IsSet(EnvVarName("MinimumContractPayment")) {
+		return c.getWithFallback("MinimumContractPayment", parseLink).(*assets.Link)
+
+		// TODO: Remove when implementing
+		// https://app.clubhouse.io/chainlinklabs/story/8096/fully-deprecate-minimum-contract-payment
+	} else if c.viper.IsSet("MINIMUM_CONTRACT_PAYMENT") {
+		str := c.viper.GetString("MINIMUM_CONTRACT_PAYMENT")
+		value, ok := new(assets.Link).SetString(str, 10)
+		if ok {
+			return value
+		}
+		logger.Errorw(
+			"Invalid value provided for MINIMUM_CONTRACT_PAYMENT, falling back to default.",
+			"value", str)
+	}
+	return minimumContractPayment
 }
 
 // MinimumRequestExpiration is the minimum allowed request expiration for a Service Agreement.
@@ -1336,13 +1319,13 @@ func (c Config) P2PPeerstoreWriteInterval() time.Duration {
 }
 
 // P2PPeerID is the default peer ID that will be used, if not overridden
-func (c Config) P2PPeerID(override *models.PeerID) (models.PeerID, error) {
+func (c Config) P2PPeerID(override *p2pkey.PeerID) (p2pkey.PeerID, error) {
 	if override != nil {
 		return *override, nil
 	}
 	pidStr := c.viper.GetString(EnvVarName("P2PPeerID"))
 	if pidStr != "" {
-		var pid models.PeerID
+		var pid p2pkey.PeerID
 		err := pid.UnmarshalText([]byte(pidStr))
 		if err != nil {
 			return "", errors.Wrapf(ErrInvalid, "P2P_PEER_ID is invalid %v", err)
@@ -1373,6 +1356,71 @@ func (c Config) P2PBootstrapPeers(override []string) ([]string, error) {
 		return nil, errors.Wrap(ErrUnset, "P2P_BOOTSTRAP_PEERS")
 	}
 	return []string{}, nil
+}
+
+// P2PNetworkingStack returns the preferred networking stack for libocr
+func (c Config) P2PNetworkingStack() (n ocrnetworking.NetworkingStack) {
+	str := c.P2PNetworkingStackRaw()
+	err := n.UnmarshalText([]byte(str))
+	if err != nil {
+		logger.Fatalf("P2PNetworkingStack failed to unmarshal '%s': %s", str, err)
+	}
+	return n
+}
+
+// P2PNetworkingStackRaw returns the raw string passed as networking stack
+func (c Config) P2PNetworkingStackRaw() string {
+	return c.viper.GetString(EnvVarName("P2PNetworkingStack"))
+}
+
+// P2PV2ListenAddresses contains the addresses the peer will listen to on the network in <host>:<port> form as
+// accepted by net.Listen, but host and port must be fully specified and cannot be empty.
+func (c Config) P2PV2ListenAddresses() []string {
+	return c.viper.GetStringSlice(EnvVarName("P2PV2ListenAddresses"))
+}
+
+// P2PV2AnnounceAddresses contains the addresses the peer will advertise on the network in <host>:<port> form as
+// accepted by net.Dial. The addresses should be reachable by peers of interest.
+func (c Config) P2PV2AnnounceAddresses() []string {
+	if c.viper.IsSet(EnvVarName("P2PV2AnnounceAddresses")) {
+		return c.viper.GetStringSlice(EnvVarName("P2PV2AnnounceAddresses"))
+	}
+	return c.P2PV2ListenAddresses()
+}
+
+// P2PV2AnnounceAddressesRaw returns the raw value passed in
+func (c Config) P2PV2AnnounceAddressesRaw() []string {
+	return c.viper.GetStringSlice(EnvVarName("P2PV2AnnounceAddresses"))
+}
+
+// P2PV2Bootstrappers returns the default bootstrapper peers for libocr's v2
+// networking stack
+func (c Config) P2PV2Bootstrappers() (locators []ocrtypes.BootstrapperLocator) {
+	bootstrappers := c.P2PV2BootstrappersRaw()
+	for _, s := range bootstrappers {
+		var locator ocrtypes.BootstrapperLocator
+		err := locator.UnmarshalText([]byte(s))
+		if err != nil {
+			logger.Fatalf("invalid format for bootstrapper '%s', got error: %s", s, err)
+		}
+		locators = append(locators, locator)
+	}
+	return
+}
+
+// P2PV2BootstrappersRaw returns the raw strings for v2 bootstrap peers
+func (c Config) P2PV2BootstrappersRaw() []string {
+	return c.viper.GetStringSlice(EnvVarName("P2PV2Bootstrappers"))
+}
+
+// P2PV2DeltaDial controls how far apart Dial attempts are
+func (c Config) P2PV2DeltaDial() models.Duration {
+	return models.MustMakeDuration(c.getWithFallback("P2PV2DeltaDial", parseDuration).(time.Duration))
+}
+
+// P2PV2DeltaReconcile controls how often a Reconcile message is sent to every peer.
+func (c Config) P2PV2DeltaReconcile() models.Duration {
+	return models.MustMakeDuration(c.getWithFallback("P2PV2DeltaReconcile", parseDuration).(time.Duration))
 }
 
 // Port represents the port Chainlink should listen on for client requests.
@@ -1452,11 +1500,6 @@ func (c Config) UnAuthenticatedRateLimitPeriod() models.Duration {
 	return models.MustMakeDuration(c.getWithFallback("UnAuthenticatedRateLimitPeriod", parseDuration).(time.Duration))
 }
 
-// KeysDir returns the path of the keys directory (used for keystore files).
-func (c Config) KeysDir() string {
-	return filepath.Join(c.RootDir(), "tempkeys")
-}
-
 func (c Config) tlsDir() string {
 	return filepath.Join(c.RootDir(), "tls")
 }
@@ -1475,23 +1518,6 @@ func (c Config) CertFile() string {
 		return filepath.Join(c.tlsDir(), "server.crt")
 	}
 	return c.TLSCertPath()
-}
-
-// HeadTimeBudget returns the time allowed for context timeout in head tracker
-func (c Config) HeadTimeBudget() time.Duration {
-	str := c.viper.GetString(EnvVarName("HeadTimeBudget"))
-	if str != "" {
-		n, err := parseDuration(str)
-		if err != nil {
-			logger.Errorw(
-				"Invalid value provided for HeadTimeBudget, falling back to default.",
-				"value", str,
-				"error", err)
-		} else {
-			return n.(time.Duration)
-		}
-	}
-	return chainSpecificConfig(c).HeadTimeBudget
 }
 
 // CreateProductionLogger returns a custom logger for the config's root
@@ -1538,7 +1564,7 @@ func (c Config) getWithFallback(name string, parser func(string) (interface{}, e
 
 	v, err := parser(defaultValue)
 	if err != nil {
-		log.Fatalf(fmt.Sprintf(`Invalid default for %s: "%s"`, name, defaultValue))
+		log.Fatalf(`Invalid default for %s: "%s" (%s)`, name, defaultValue, err)
 	}
 	return v
 }
@@ -1648,16 +1674,6 @@ func parseHomeDir(str string) (interface{}, error) {
 // LogLevel determines the verbosity of the events to be logged.
 type LogLevel struct {
 	zapcore.Level
-}
-
-// ForGin keeps Gin's mode at the appropriate level with the LogLevel.
-func (ll LogLevel) ForGin() string {
-	switch {
-	case ll.Level < zapcore.InfoLevel:
-		return gin.DebugMode
-	default:
-		return gin.ReleaseMode
-	}
 }
 
 type DatabaseBackupMode string

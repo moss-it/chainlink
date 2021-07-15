@@ -7,6 +7,8 @@ import (
 
 	"github.com/smartcontractkit/chainlink/core/adapters"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/core/services/bulletprooftxmanager"
+	"github.com/smartcontractkit/chainlink/core/services/headtracker"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 
 	gethCommon "github.com/ethereum/go-ethereum/common"
@@ -20,7 +22,9 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 
 	store, cleanup := cltest.NewStore(t)
 	defer cleanup()
-	_, fromAddress := cltest.MustAddRandomKeyToKeystore(t, store, 0)
+	orm := headtracker.NewORM(store.DB)
+	keyStore := cltest.NewKeyStore(t, store.DB)
+	_, fromAddress := cltest.MustAddRandomKeyToKeystore(t, keyStore.Eth(), 0)
 
 	toAddress := cltest.NewAddress()
 	gasLimit := uint64(42)
@@ -39,7 +43,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
 		d, err := input.Data().Add(models.ResultCollectionKey, []interface{}{12, false, "0x1234"})
 		require.NoError(t, err)
-		runOutput := adapter.Perform(input.CloneWithData(d), store)
+		runOutput := adapter.Perform(input.CloneWithData(d), store, keyStore)
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusPendingOutgoingConfirmations, runOutput.Status())
 		etrt, err := store.FindEthTaskRunTxByTaskRunID(input.TaskRunID())
@@ -61,7 +65,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 			"1234000000000000000000000000000000000000000000000000000000000000", // contents
 			hex.EncodeToString(etrt.EthTx.EncodedPayload))
 		assert.Equal(t, gasLimit, etrt.EthTx.GasLimit)
-		assert.Equal(t, models.EthTxUnstarted, etrt.EthTx.State)
+		assert.Equal(t, bulletprooftxmanager.EthTxUnstarted, etrt.EthTx.State)
 	})
 
 	t.Run("with valid data and empty DataFormat writes to database and returns run output pending outgoing confirmations", func(t *testing.T) {
@@ -73,7 +77,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		}
 		taskRunID, jobRun := cltest.MustInsertTaskRun(t, store)
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusPendingOutgoingConfirmations, runOutput.Status())
 
@@ -86,7 +90,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		assert.Equal(t, toAddress, etrt.EthTx.ToAddress)
 		assert.Equal(t, "70a08231888888880000000000000000000000000000000000000000000000000000009786856756", hex.EncodeToString(etrt.EthTx.EncodedPayload))
 		assert.Equal(t, gasLimit, etrt.EthTx.GasLimit)
-		assert.Equal(t, models.EthTxUnstarted, etrt.EthTx.State)
+		assert.Equal(t, bulletprooftxmanager.EthTxUnstarted, etrt.EthTx.State)
 	})
 
 	t.Run("if FromAddresses is provided but no key matches, returns job error", func(t *testing.T) {
@@ -99,7 +103,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		}
 		taskRunID, jobRun := cltest.MustInsertTaskRun(t, store)
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 		require.EqualError(t, runOutput.Error(), "insertEthTx failed to pickFromAddress: no keys available")
 		assert.Equal(t, models.RunStatusErrored, runOutput.Status())
 	})
@@ -114,7 +118,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		}
 		taskRunID, jobRun := cltest.MustInsertTaskRun(t, store)
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "cönfirmed", models.RunStatusUnstarted)
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusPendingOutgoingConfirmations, runOutput.Status())
 
@@ -141,7 +145,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		}
 		taskRunID, jobRun := cltest.MustInsertTaskRun(t, store)
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 		assert.Contains(t, runOutput.Error().Error(), "while constructing EthTx data: unsupported format: some old bollocks")
 		assert.Equal(t, models.RunStatusErrored, runOutput.Status())
 
@@ -164,7 +168,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
 
 		// Do the thing
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusPendingOutgoingConfirmations, runOutput.Status())
@@ -184,7 +188,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
 
 		// Do the thing
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusPendingOutgoingConfirmations, runOutput.Status())
@@ -204,7 +208,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		confirmedAttemptHash := etx.EthTxAttempts[0].Hash
 
 		cltest.MustInsertEthReceipt(t, store, 1, cltest.NewHash(), confirmedAttemptHash)
-		require.NoError(t, store.IdempotentInsertHead(context.TODO(), models.Head{
+		require.NoError(t, orm.IdempotentInsertHead(context.TODO(), models.Head{
 			Hash:   cltest.NewHash(),
 			Number: 12,
 		}))
@@ -213,7 +217,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
 
 		// Do the thing
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusPendingOutgoingConfirmations, runOutput.Status())
@@ -233,7 +237,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		confirmedAttemptHash := etx.EthTxAttempts[0].Hash
 
 		cltest.MustInsertEthReceipt(t, store, 1, cltest.NewHash(), confirmedAttemptHash)
-		require.NoError(t, store.IdempotentInsertHead(context.TODO(), models.Head{
+		require.NoError(t, orm.IdempotentInsertHead(context.TODO(), models.Head{
 			Hash:   cltest.NewHash(),
 			Number: 13,
 		}))
@@ -243,7 +247,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		input := models.NewRunInput(jobRun, taskRunID, data, models.RunStatusUnstarted)
 
 		// Do the thing
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusCompleted, runOutput.Status())
@@ -268,7 +272,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		confirmedAttemptHash := etx.EthTxAttempts[0].Hash
 
 		cltest.MustInsertEthReceipt(t, store, 1, cltest.NewHash(), confirmedAttemptHash)
-		require.NoError(t, store.IdempotentInsertHead(context.TODO(), models.Head{
+		require.NoError(t, orm.IdempotentInsertHead(context.TODO(), models.Head{
 			Hash:   cltest.NewHash(),
 			Number: 14,
 		}))
@@ -277,7 +281,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
 
 		// Do the thing
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusCompleted, runOutput.Status())
@@ -298,7 +302,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		confirmedAttemptHash := attempt2.Hash
 
 		cltest.MustInsertEthReceipt(t, store, 1, cltest.NewHash(), confirmedAttemptHash)
-		require.NoError(t, store.IdempotentInsertHead(context.TODO(), models.Head{
+		require.NoError(t, orm.IdempotentInsertHead(context.TODO(), models.Head{
 			Hash:   cltest.NewHash(),
 			Number: int64(store.Config.MinRequiredOutgoingConfirmations()) + 2,
 		}))
@@ -307,7 +311,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
 
 		// Do the thing
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 
 		require.NoError(t, runOutput.Error())
 		assert.Equal(t, models.RunStatusCompleted, runOutput.Status())
@@ -329,7 +333,7 @@ func TestEthTxAdapter_Perform_BPTXM(t *testing.T) {
 		input := models.NewRunInputWithResult(jobRun, taskRunID, "0x9786856756", models.RunStatusUnstarted)
 
 		// Do the thing
-		runOutput := adapter.Perform(*input, store)
+		runOutput := adapter.Perform(*input, store, keyStore)
 
 		require.EqualError(t, runOutput.Error(), "something exploded")
 		assert.Equal(t, models.RunStatusErrored, runOutput.Status())

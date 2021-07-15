@@ -3,16 +3,18 @@ package fluxmonitorv2
 import (
 	"time"
 
+	uuid "github.com/satori/go.uuid"
+
 	"github.com/pelletier/go-toml"
 	"github.com/pkg/errors"
 	"github.com/smartcontractkit/chainlink/core/services/job"
-	"github.com/smartcontractkit/chainlink/core/services/pipeline"
 	coreorm "github.com/smartcontractkit/chainlink/core/store/orm"
+	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 func ValidatedFluxMonitorSpec(config *coreorm.Config, ts string) (job.Job, error) {
 	var jb = job.Job{
-		Pipeline: *pipeline.NewTaskDAG(),
+		ExternalJobID: uuid.NewV4(), // Default to generating a uuid, can be overwritten by the specified one in tomlString.
 	}
 	var spec job.FluxMonitorSpec
 	tree, err := toml.Load(ts)
@@ -35,6 +37,9 @@ func ValidatedFluxMonitorSpec(config *coreorm.Config, ts string) (job.Job, error
 	if jb.SchemaVersion != uint32(1) {
 		return jb, errors.Errorf("the only supported schema version is currently 1, got %v", jb.SchemaVersion)
 	}
+	if jb.Pipeline.HasAsync() {
+		return jb, errors.Errorf("async=true tasks are not supported for %v", jb.Type)
+	}
 
 	// Find the smallest of all the timeouts
 	// and ensure the polling period is greater than that.
@@ -56,8 +61,15 @@ func ValidatedFluxMonitorSpec(config *coreorm.Config, ts string) (job.Job, error
 		}
 	}
 
-	if !validatePollTimer(spec.PollTimerDisabled, minTimeout, spec.PollTimerPeriod) {
-		return jb, errors.Errorf("pollTimer.period must be equal or greater than %v, got %v", minTimeout, spec.PollTimerPeriod)
+	if jb.FluxMonitorSpec.DrumbeatEnabled {
+		err := utils.ValidateCronSchedule(jb.FluxMonitorSpec.DrumbeatSchedule)
+		if err != nil {
+			return jb, errors.Wrap(err, "while validating drumbeat schedule")
+		}
+	}
+
+	if !validatePollTimer(jb.FluxMonitorSpec.PollTimerDisabled, minTimeout, jb.FluxMonitorSpec.PollTimerPeriod) {
+		return jb, errors.Errorf("pollTimer.period must be equal or greater than %v, got %v", minTimeout, jb.FluxMonitorSpec.PollTimerPeriod)
 	}
 
 	return jb, nil

@@ -2,12 +2,11 @@ package services_test
 
 import (
 	"fmt"
-
-	"gorm.io/gorm"
-
 	"math/big"
 	"testing"
 	"time"
+
+	"gorm.io/gorm"
 
 	uuid "github.com/satori/go.uuid"
 	"github.com/smartcontractkit/chainlink/core/adapters"
@@ -187,7 +186,7 @@ func TestRunManager_ResumeAllPendingConnection(t *testing.T) {
 
 		job, err := store.FindJobSpec(run.JobSpecID)
 		require.NoError(t, err)
-		run.TaskRuns = []models.TaskRun{models.TaskRun{ID: uuid.NewV4(), TaskSpecID: job.Tasks[0].ID, Status: models.RunStatusUnstarted}}
+		run.TaskRuns = []models.TaskRun{{ID: uuid.NewV4(), TaskSpecID: job.Tasks[0].ID, Status: models.RunStatusUnstarted}}
 
 		require.NoError(t, store.CreateJobRun(&run))
 		err = runManager.ResumeAllPendingConnection()
@@ -202,6 +201,10 @@ func TestRunManager_ResumeAllPendingConnection(t *testing.T) {
 func TestRunManager_ResumeAllPendingConnection_NotEnoughConfirmations(t *testing.T) {
 	t.Parallel()
 	ethClient, _, assertMocksCalled := cltest.NewEthMocksWithStartupAssertions(t)
+
+	sub := new(mocks.Subscription)
+	ethClient.On("SubscribeFilterLogs", mock.Anything, mock.Anything, mock.Anything).Maybe().Return(sub, nil)
+
 	defer assertMocksCalled()
 	app, cleanup := cltest.NewApplication(t,
 		ethClient,
@@ -336,9 +339,11 @@ func TestRunManager_Create_fromRunLog_Happy(t *testing.T) {
 			ethClient.On("SubscribeNewHead", mock.Anything, mock.Anything).Return(sub, nil)
 			sub.On("Err").Return(nil)
 			sub.On("Unsubscribe").Return()
+			b := types.NewBlockWithHeader(&types.Header{
+				Number: big.NewInt(1),
+			})
+			ethClient.On("BlockByNumber", mock.Anything, mock.Anything).Maybe().Return(b, nil)
 
-			kst := new(mocks.KeyStoreInterface)
-			app.Store.KeyStore = kst
 			defer cleanup()
 
 			app.StartAndConnect()
@@ -376,7 +381,6 @@ func TestRunManager_Create_fromRunLog_Happy(t *testing.T) {
 			assert.True(t, run.TaskRuns[0].MinRequiredIncomingConfirmations.Valid)
 			assert.Equal(t, minimumConfirmations, run.TaskRuns[0].ObservedIncomingConfirmations.Uint32, "task run should track its current confirmations")
 			assert.True(t, run.TaskRuns[0].ObservedIncomingConfirmations.Valid)
-			kst.AssertExpectations(t)
 		})
 	}
 }
@@ -571,7 +575,7 @@ func TestRunManager_Create_fromRunLogPayments(t *testing.T) {
 			config, configCleanup := cltest.NewConfig(t)
 			defer configCleanup()
 			config.Set("DATABASE_TIMEOUT", "10s") // Lots of parallelized tests
-			config.Set("MINIMUM_CONTRACT_PAYMENT", test.configMinimumPayment)
+			config.Set("MINIMUM_CONTRACT_PAYMENT_LINK_JUELS", test.configMinimumPayment)
 
 			store, storeCleanup := cltest.NewStoreWithConfig(t, config)
 			defer storeCleanup()
@@ -629,8 +633,6 @@ func TestRunManager_Create_fromRunLog_ConnectToLaggingEthNode(t *testing.T) {
 	app, cleanup := cltest.NewApplicationWithConfig(t, config,
 		ethClient,
 	)
-	kst := new(mocks.KeyStoreInterface)
-	app.Store.KeyStore = kst
 	defer cleanup()
 
 	require.NoError(t, app.StartAndConnect())
@@ -661,8 +663,6 @@ func TestRunManager_Create_fromRunLog_ConnectToLaggingEthNode(t *testing.T) {
 	updatedJR := cltest.WaitForJobRunToPendIncomingConfirmations(t, app.Store, *jr)
 	assert.True(t, updatedJR.TaskRuns[0].ObservedIncomingConfirmations.Valid)
 	assert.Equal(t, uint32(0), updatedJR.TaskRuns[0].ObservedIncomingConfirmations.Uint32)
-
-	kst.AssertExpectations(t)
 }
 
 func TestRunManager_ResumeConfirmingTasks(t *testing.T) {

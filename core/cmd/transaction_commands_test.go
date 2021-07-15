@@ -7,7 +7,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/smartcontractkit/chainlink/core/cmd"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
-	"github.com/smartcontractkit/chainlink/core/store/models"
+	"github.com/smartcontractkit/chainlink/core/services/bulletprooftxmanager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli"
@@ -20,7 +20,7 @@ func TestClient_IndexTransactions(t *testing.T) {
 	client, r := app.NewClientAndRenderer()
 
 	store := app.GetStore()
-	_, from := cltest.MustAddRandomKeyToKeystore(t, store)
+	_, from := cltest.MustAddRandomKeyToKeystore(t, app.KeyStore.Eth())
 
 	tx := cltest.MustInsertConfirmedEthTxWithAttempt(t, store, 0, 1, from)
 	attempt := tx.EthTxAttempts[0]
@@ -54,7 +54,7 @@ func TestClient_ShowTransaction(t *testing.T) {
 	client, r := app.NewClientAndRenderer()
 
 	store := app.GetStore()
-	_, from := cltest.MustAddRandomKeyToKeystore(t, store)
+	_, from := cltest.MustAddRandomKeyToKeystore(t, app.KeyStore.Eth())
 
 	tx := cltest.MustInsertConfirmedEthTxWithAttempt(t, store, 0, 1, from)
 	attempt := tx.EthTxAttempts[0]
@@ -75,7 +75,7 @@ func TestClient_IndexTxAttempts(t *testing.T) {
 	client, r := app.NewClientAndRenderer()
 
 	store := app.GetStore()
-	_, from := cltest.MustAddRandomKeyToKeystore(t, store)
+	_, from := cltest.MustAddRandomKeyToKeystore(t, app.KeyStore.Eth())
 
 	tx := cltest.MustInsertConfirmedEthTxWithAttempt(t, store, 0, 1, from)
 
@@ -118,7 +118,7 @@ func TestClient_SendEther_From_BPTXM(t *testing.T) {
 
 	set := flag.NewFlagSet("sendether", 0)
 	amount := "100.5"
-	_, fromAddress := cltest.MustAddRandomKeyToKeystore(t, s, 0)
+	_, fromAddress := cltest.MustAddRandomKeyToKeystore(t, app.KeyStore.Eth(), 0)
 	to := "0x342156c8d3bA54Abc67920d35ba1d1e67201aC9C"
 	set.Parse([]string{amount, fromAddress.Hex(), to})
 
@@ -127,7 +127,7 @@ func TestClient_SendEther_From_BPTXM(t *testing.T) {
 
 	assert.NoError(t, client.SendEther(c))
 
-	etx := models.EthTx{}
+	etx := bulletprooftxmanager.EthTx{}
 	require.NoError(t, s.DB.First(&etx).Error)
 	require.Equal(t, "100.500000000000000000", etx.Value.String())
 	require.Equal(t, fromAddress, etx.FromAddress)

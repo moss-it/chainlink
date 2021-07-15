@@ -11,6 +11,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/keeper_registry_wrapper"
 	"github.com/smartcontractkit/chainlink/core/internal/mocks"
+	"github.com/smartcontractkit/chainlink/core/services/bulletprooftxmanager"
 	"github.com/smartcontractkit/chainlink/core/services/job"
 	"github.com/smartcontractkit/chainlink/core/services/keeper"
 	"github.com/smartcontractkit/chainlink/core/services/log"
@@ -47,13 +48,15 @@ func setupRegistrySync(t *testing.T) (
 	*mocks.Client,
 	*logmocks.Broadcaster,
 	job.Job,
-	func(),
 ) {
 	store, cleanup := cltest.NewStore(t)
+	t.Cleanup(cleanup)
 	ethMock := new(mocks.Client)
 	lbMock := new(logmocks.Broadcaster)
 	j := cltest.MustInsertKeeperJob(t, store, cltest.NewEIP55Address(), cltest.NewEIP55Address())
-	jpv2 := cltest.NewJobPipelineV2(t, store.DB)
+	cfg, cleanup := cltest.NewConfig(t)
+	t.Cleanup(cleanup)
+	jpv2 := cltest.NewJobPipelineV2(t, cfg, store.DB, nil, nil)
 	contractAddress := j.KeeperSpec.ContractAddress.Address()
 	contract, err := keeper_registry_wrapper.NewKeeperRegistry(
 		contractAddress,
@@ -62,12 +65,13 @@ func setupRegistrySync(t *testing.T) (
 	require.NoError(t, err)
 
 	lbMock.On("Register", mock.Anything, mock.MatchedBy(func(opts log.ListenerOpts) bool {
-		return opts.Contract.Address() == contractAddress
+		return opts.Contract == contractAddress
 	})).Return(func() {})
 	lbMock.On("IsConnected").Return(true).Maybe()
 
-	synchronizer := keeper.NewRegistrySynchronizer(j, contract, store.DB, jpv2.Jrm, lbMock, syncInterval, 1)
-	return store, synchronizer, ethMock, lbMock, j, cleanup
+	orm := keeper.NewORM(store.DB, nil, store.Config, bulletprooftxmanager.SendEveryStrategy{})
+	synchronizer := keeper.NewRegistrySynchronizer(j, contract, orm, jpv2.Jrm, lbMock, syncInterval, 1)
+	return store, synchronizer, ethMock, lbMock, j
 }
 
 func assertUpkeepIDs(t *testing.T, store *store.Store, expected []int64) {
@@ -80,8 +84,7 @@ func assertUpkeepIDs(t *testing.T, store *store.Store, expected []int64) {
 }
 
 func Test_RegistrySynchronizer_Start(t *testing.T) {
-	store, synchronizer, ethMock, _, job, cleanup := setupRegistrySync(t)
-	defer cleanup()
+	store, synchronizer, ethMock, _, job := setupRegistrySync(t)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
 	fromAddress := job.KeeperSpec.FromAddress.Address()
@@ -112,8 +115,7 @@ func Test_RegistrySynchronizer_CalcPositioningConstant(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer_FullSync(t *testing.T) {
-	store, synchronizer, ethMock, _, job, cleanup := setupRegistrySync(t)
-	defer cleanup()
+	store, synchronizer, ethMock, _, job := setupRegistrySync(t)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
 	fromAddress := job.KeeperSpec.FromAddress.Address()
@@ -141,7 +143,7 @@ func Test_RegistrySynchronizer_FullSync(t *testing.T) {
 	require.Equal(t, int32(0), registry.KeeperIndex)
 	require.Equal(t, int32(1), registry.NumKeepers)
 	require.Equal(t, upkeepConfig.CheckData, upkeepRegistration.CheckData)
-	require.Equal(t, int32(upkeepConfig.ExecuteGas), upkeepRegistration.ExecuteGas)
+	require.Equal(t, uint64(upkeepConfig.ExecuteGas), upkeepRegistration.ExecuteGas)
 
 	assertUpkeepIDs(t, store, []int64{0, 2})
 	ethMock.AssertExpectations(t)
@@ -163,8 +165,7 @@ func Test_RegistrySynchronizer_FullSync(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer_ConfigSetLog(t *testing.T) {
-	store, synchronizer, ethMock, lb, job, cleanup := setupRegistrySync(t)
-	defer cleanup()
+	store, synchronizer, ethMock, lb, job := setupRegistrySync(t)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
 	fromAddress := job.KeeperSpec.FromAddress.Address()
@@ -207,8 +208,7 @@ func Test_RegistrySynchronizer_ConfigSetLog(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer_KeepersUpdatedLog(t *testing.T) {
-	store, synchronizer, ethMock, lb, job, cleanup := setupRegistrySync(t)
-	defer cleanup()
+	store, synchronizer, ethMock, lb, job := setupRegistrySync(t)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
 	fromAddress := job.KeeperSpec.FromAddress.Address()
@@ -251,8 +251,7 @@ func Test_RegistrySynchronizer_KeepersUpdatedLog(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer_UpkeepCanceledLog(t *testing.T) {
-	store, synchronizer, ethMock, lb, job, cleanup := setupRegistrySync(t)
-	defer cleanup()
+	store, synchronizer, ethMock, lb, job := setupRegistrySync(t)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
 	fromAddress := job.KeeperSpec.FromAddress.Address()
@@ -288,8 +287,7 @@ func Test_RegistrySynchronizer_UpkeepCanceledLog(t *testing.T) {
 }
 
 func Test_RegistrySynchronizer_UpkeepRegisteredLog(t *testing.T) {
-	store, synchronizer, ethMock, lb, job, cleanup := setupRegistrySync(t)
-	defer cleanup()
+	store, synchronizer, ethMock, lb, job := setupRegistrySync(t)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
 	fromAddress := job.KeeperSpec.FromAddress.Address()
@@ -327,8 +325,7 @@ func Test_RegistrySynchronizer_UpkeepRegisteredLog(t *testing.T) {
 func Test_RegistrySynchronizer_UpkeepPerformedLog(t *testing.T) {
 	g := gomega.NewGomegaWithT(t)
 
-	store, synchronizer, ethMock, lb, job, cleanup := setupRegistrySync(t)
-	defer cleanup()
+	store, synchronizer, ethMock, lb, job := setupRegistrySync(t)
 
 	contractAddress := job.KeeperSpec.ContractAddress.Address()
 	fromAddress := job.KeeperSpec.FromAddress.Address()

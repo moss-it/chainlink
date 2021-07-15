@@ -3,10 +3,7 @@ package orm_test
 import (
 	"context"
 	"fmt"
-	"io"
 	"math/big"
-	"os"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -16,14 +13,16 @@ import (
 	"github.com/smartcontractkit/chainlink/core/assets"
 	"github.com/smartcontractkit/chainlink/core/auth"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
+	"github.com/smartcontractkit/chainlink/core/internal/cltest/heavyweight"
 	"github.com/smartcontractkit/chainlink/core/internal/mocks"
 	"github.com/smartcontractkit/chainlink/core/services"
+	"github.com/smartcontractkit/chainlink/core/services/bulletprooftxmanager"
+	"github.com/smartcontractkit/chainlink/core/services/postgres"
 	"github.com/smartcontractkit/chainlink/core/services/synchronization"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/store/orm"
 	"github.com/smartcontractkit/chainlink/core/utils"
 
-	"github.com/ethereum/go-ethereum/common"
 	uuid "github.com/satori/go.uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -116,10 +115,10 @@ func TestORM_ShowJobWithMultipleTasks(t *testing.T) {
 
 	job := cltest.NewJob()
 	job.Tasks = []models.TaskSpec{
-		models.TaskSpec{Type: models.MustNewTaskType("task1")},
-		models.TaskSpec{Type: models.MustNewTaskType("task2")},
-		models.TaskSpec{Type: models.MustNewTaskType("task3")},
-		models.TaskSpec{Type: models.MustNewTaskType("task4")},
+		{Type: models.MustNewTaskType("task1")},
+		{Type: models.MustNewTaskType("task2")},
+		{Type: models.MustNewTaskType("task3")},
+		{Type: models.MustNewTaskType("task4")},
 	}
 	assert.NoError(t, store.CreateJob(&job))
 
@@ -723,7 +722,7 @@ func TestORM_AnyJobWithType(t *testing.T) {
 	defer cleanup()
 
 	js := cltest.NewJobWithWebInitiator()
-	js.Tasks = []models.TaskSpec{models.TaskSpec{Type: models.MustNewTaskType("bridgetestname")}}
+	js.Tasks = []models.TaskSpec{{Type: models.MustNewTaskType("bridgetestname")}}
 	assert.NoError(t, store.CreateJob(&js))
 	found, err := store.AnyJobWithType("bridgetestname")
 	assert.NoError(t, err)
@@ -845,6 +844,7 @@ func TestORM_PendingBridgeType_alreadyCompleted(t *testing.T) {
 
 	store, cleanup := cltest.NewStore(t)
 	defer cleanup()
+	keyStore := cltest.NewKeyStore(t, store.DB)
 
 	_, bt := cltest.NewBridgeType(t)
 	require.NoError(t, store.CreateBridgeType(bt))
@@ -858,7 +858,7 @@ func TestORM_PendingBridgeType_alreadyCompleted(t *testing.T) {
 	pusher := new(mocks.StatsPusher)
 	pusher.On("PushNow").Return(nil)
 
-	executor := services.NewRunExecutor(store, pusher)
+	executor := services.NewRunExecutor(store, keyStore, pusher)
 	require.NoError(t, executor.Execute(run.ID))
 
 	cltest.WaitForJobRunStatus(t, store, run, models.RunStatusCompleted)
@@ -877,7 +877,7 @@ func TestORM_PendingBridgeType_success(t *testing.T) {
 	require.NoError(t, store.CreateBridgeType(bt))
 
 	job := cltest.NewJobWithWebInitiator()
-	job.Tasks = []models.TaskSpec{models.TaskSpec{Type: bt.Name}}
+	job.Tasks = []models.TaskSpec{{Type: bt.Name}}
 	assert.NoError(t, store.CreateJob(&job))
 
 	unfinishedRun := cltest.NewJobRun(job)
@@ -1100,9 +1100,8 @@ func TestBulkDeleteRuns(t *testing.T) {
 	var resultCount int64
 	var taskCount int64
 	var runCount int64
-	orm := store.ORM
 
-	err := orm.RawDBWithAdvisoryLock(func(db *gorm.DB) error {
+	err := store.ORM.RawDBWithAdvisoryLock(func(db *gorm.DB) error {
 		job := cltest.NewJobWithWebInitiator()
 		require.NoError(t, store.ORM.CreateJob(&job))
 
@@ -1110,7 +1109,7 @@ func TestBulkDeleteRuns(t *testing.T) {
 		// but none of the statuses
 		oldIncompleteRun := cltest.NewJobRun(job)
 		oldIncompleteRun.Result = models.RunResult{Data: cltest.JSONFromString(t, `{"result": 17}`)}
-		err := orm.CreateJobRun(&oldIncompleteRun)
+		err := store.ORM.CreateJobRun(&oldIncompleteRun)
 		require.NoError(t, err)
 		db.Model(&oldIncompleteRun).UpdateColumn("updated_at", cltest.ParseISO8601(t, "2018-01-01T00:00:00Z"))
 
@@ -1120,7 +1119,7 @@ func TestBulkDeleteRuns(t *testing.T) {
 		oldCompletedRun.TaskRuns[0].Status = models.RunStatusCompleted
 		oldCompletedRun.Result = models.RunResult{Data: cltest.JSONFromString(t, `{"result": 19}`)}
 		oldCompletedRun.SetStatus(models.RunStatusCompleted)
-		err = orm.CreateJobRun(&oldCompletedRun)
+		err = store.ORM.CreateJobRun(&oldCompletedRun)
 		require.NoError(t, err)
 		db.Model(&oldCompletedRun).UpdateColumn("updated_at", cltest.ParseISO8601(t, "2018-01-01T00:00:00Z"))
 
@@ -1129,7 +1128,7 @@ func TestBulkDeleteRuns(t *testing.T) {
 		newCompletedRun := cltest.NewJobRun(job)
 		newCompletedRun.Result = models.RunResult{Data: cltest.JSONFromString(t, `{"result": 23}`)}
 		newCompletedRun.SetStatus(models.RunStatusCompleted)
-		err = orm.CreateJobRun(&newCompletedRun)
+		err = store.ORM.CreateJobRun(&newCompletedRun)
 		require.NoError(t, err)
 		db.Model(&newCompletedRun).UpdateColumn("updated_at", cltest.ParseISO8601(t, "2018-01-30T00:00:00Z"))
 
@@ -1137,11 +1136,11 @@ func TestBulkDeleteRuns(t *testing.T) {
 		newIncompleteRun := cltest.NewJobRun(job)
 		newIncompleteRun.Result = models.RunResult{Data: cltest.JSONFromString(t, `{"result": 71}`)}
 		newIncompleteRun.SetStatus(models.RunStatusCompleted)
-		err = orm.CreateJobRun(&newIncompleteRun)
+		err = store.ORM.CreateJobRun(&newIncompleteRun)
 		require.NoError(t, err)
 		db.Model(&newIncompleteRun).UpdateColumn("updated_at", cltest.ParseISO8601(t, "2018-01-30T00:00:00Z"))
 
-		err = store.ORM.BulkDeleteRuns(&models.BulkDeleteRunRequest{
+		err = postgres.BulkDeleteRuns(store.DB, &models.BulkDeleteRunRequest{
 			Status:        []models.RunStatus{models.RunStatusCompleted},
 			UpdatedBefore: cltest.ParseISO8601(t, "2018-01-15T00:00:00Z"),
 		})
@@ -1162,76 +1161,6 @@ func TestBulkDeleteRuns(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-}
-
-func TestORM_KeysOrdersByCreatedAtAsc(t *testing.T) {
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
-	orm := store.ORM
-
-	earlier := cltest.MustInsertRandomKey(t, store.DB)
-	later := cltest.MustInsertRandomKey(t, store.DB)
-
-	require.NoError(t, orm.CreateKeyIfNotExists(later))
-
-	keys, err := store.SendKeys()
-	require.NoError(t, err)
-
-	require.Len(t, keys, 2)
-
-	assert.Equal(t, keys[0].Address, earlier.Address)
-	assert.Equal(t, keys[1].Address, later.Address)
-}
-
-func TestORM_SendKeys(t *testing.T) {
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
-
-	cltest.MustInsertRandomKey(t, store.DB, false)
-	cltest.MustInsertRandomKey(t, store.DB, true)
-
-	keys, err := store.AllKeys()
-	require.NoError(t, err)
-	require.Len(t, keys, 2)
-
-	keys, err = store.SendKeys()
-	require.NoError(t, err)
-	require.Len(t, keys, 1)
-}
-
-func TestORM_SyncDbKeyStoreToDisk(t *testing.T) {
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
-	require.NoError(t, store.KeyStore.Unlock(cltest.Password))
-
-	orm := store.ORM
-
-	dbkeys, err := store.SendKeys()
-	require.NoError(t, err)
-	require.Len(t, dbkeys, 0)
-
-	seed, err := models.NewKeyFromFile(fmt.Sprintf("../../internal/fixtures/keys/%s", cltest.DefaultKeyFixtureFileName))
-	require.NoError(t, err)
-	require.NoError(t, orm.CreateKeyIfNotExists(seed))
-
-	keysDir := store.Config.KeysDir()
-
-	require.True(t, isDirEmpty(t, keysDir))
-	err = orm.ClobberDiskKeyStoreWithDBKeys(keysDir)
-	require.NoError(t, err)
-
-	dbkeys, err = store.SendKeys()
-	require.NoError(t, err)
-	require.Len(t, dbkeys, 1)
-
-	diskkeys, err := utils.FilesInDir(keysDir)
-	require.NoError(t, err)
-	require.Len(t, diskkeys, 1)
-
-	key := dbkeys[0]
-	content, err := utils.FileContents(filepath.Join(keysDir, diskkeys[0]))
-	require.NoError(t, err)
-	assert.Equal(t, key.JSON.String(), content)
 }
 
 const linkEthTxWithTaskRunQuery = `
@@ -1282,11 +1211,11 @@ func TestORM_RemoveUnstartedTransaction_RemoveByEthTx(t *testing.T) {
 	require.NoError(t, store.DB.Find(&runRequests).Error)
 	assert.Len(t, runRequests, 1, "expected only one RunRequests to be left in the db")
 
-	ethTxes := []models.EthTx{}
+	ethTxes := []bulletprooftxmanager.EthTx{}
 	require.NoError(t, store.DB.Find(&ethTxes).Error)
 	assert.Len(t, ethTxes, 1, "expected only one EthTx to be left in the db")
 
-	ethTxAttempts := []models.EthTxAttempt{}
+	ethTxAttempts := []bulletprooftxmanager.EthTxAttempt{}
 	require.NoError(t, store.DB.Find(&ethTxAttempts).Error)
 	assert.Len(t, ethTxAttempts, 1, "expected only one EthTxAttempt to be left in the db")
 }
@@ -1333,8 +1262,9 @@ func TestORM_RemoveUnstartedTransaction_RemoveByJobRun(t *testing.T) {
 func TestORM_EthTransactionsWithAttempts(t *testing.T) {
 	store, cleanup := cltest.NewStore(t)
 	defer cleanup()
+	ethKeyStore := cltest.NewKeyStore(t, store.DB).Eth()
 
-	_, from := cltest.MustAddRandomKeyToKeystore(t, store, 0)
+	_, from := cltest.MustAddRandomKeyToKeystore(t, ethKeyStore, 0)
 
 	cltest.MustInsertConfirmedEthTxWithAttempt(t, store, 0, 1, from)        // tx1
 	tx2 := cltest.MustInsertConfirmedEthTxWithAttempt(t, store, 1, 2, from) // tx2
@@ -1342,18 +1272,18 @@ func TestORM_EthTransactionsWithAttempts(t *testing.T) {
 	// add 2nd attempt to tx2
 	blockNum := int64(3)
 	attempt := cltest.NewEthTxAttempt(t, tx2.ID)
-	attempt.State = models.EthTxAttemptBroadcast
+	attempt.State = bulletprooftxmanager.EthTxAttemptBroadcast
 	attempt.GasPrice = *utils.NewBig(big.NewInt(3))
 	attempt.BroadcastBeforeBlockNum = &blockNum
 	require.NoError(t, store.DB.Create(&attempt).Error)
 
 	// tx 3 has no attempts
 	tx3 := cltest.NewEthTx(t, store, from)
-	tx3.State = models.EthTxUnstarted
+	tx3.State = bulletprooftxmanager.EthTxUnstarted
 	tx3.FromAddress = from
 	require.NoError(t, store.DB.Save(&tx3).Error)
 
-	count, err := store.CountOf(models.EthTx{})
+	count, err := store.CountOf(bulletprooftxmanager.EthTx{})
 	require.NoError(t, err)
 	require.Equal(t, 3, count)
 
@@ -1395,23 +1325,6 @@ func TestORM_UpdateBridgeType(t *testing.T) {
 	foundbridge, err := store.FindBridge("UniqueName")
 	require.NoError(t, err)
 	require.Equal(t, updateBridge.URL, foundbridge.URL)
-}
-
-func isDirEmpty(t *testing.T, dir string) bool {
-	f, err := os.Open(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return true
-		}
-		t.Fatal(err)
-	}
-	defer f.Close()
-
-	if _, err = f.Readdirnames(1); err == io.EOF {
-		return true
-	}
-
-	return false
 }
 
 func TestJobs_All(t *testing.T) {
@@ -1481,7 +1394,7 @@ func TestJobs_SQLiteBatchSizeIntegrity(t *testing.T) {
 	require.NoError(t, store.CreateJob(&archivedJob))
 
 	jobs := []models.JobSpec{}
-	jobNumber := int(orm.BatchSize*2 + 1)
+	jobNumber := int(postgres.BatchSize*2 + 1)
 	for i := 0; i < jobNumber; i++ {
 		job := cltest.NewJobWithFluxMonitorInitiator()
 		require.NoError(t, store.CreateJob(&job))
@@ -1499,122 +1412,18 @@ func TestJobs_SQLiteBatchSizeIntegrity(t *testing.T) {
 	assert.Equal(t, jobNumber, counter)
 }
 
-func TestORM_Heads_Chain(t *testing.T) {
-	t.Parallel()
-
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
-
-	// A competing chain existed from block num 3 to 4
-	var baseOfForkHash common.Hash
-	var longestChainHeadHash common.Hash
-	var parentHash *common.Hash
-	for idx := 0; idx < 8; idx++ {
-		h := *cltest.Head(idx)
-		if parentHash != nil {
-			h.ParentHash = *parentHash
-		}
-		parentHash = &h.Hash
-		if idx == 2 {
-			baseOfForkHash = h.Hash
-		} else if idx == 7 {
-			longestChainHeadHash = h.Hash
-		}
-		assert.Nil(t, store.IdempotentInsertHead(context.TODO(), h))
-	}
-
-	competingHead1 := *cltest.Head(3)
-	competingHead1.ParentHash = baseOfForkHash
-	assert.Nil(t, store.IdempotentInsertHead(context.TODO(), competingHead1))
-	competingHead2 := *cltest.Head(4)
-	competingHead2.ParentHash = competingHead1.Hash
-	assert.Nil(t, store.IdempotentInsertHead(context.TODO(), competingHead2))
-
-	// Query for the top of the longer chain does not include the competing chain
-	h, err := store.Chain(context.TODO(), longestChainHeadHash, 12)
-	require.NoError(t, err)
-	assert.Equal(t, longestChainHeadHash, h.Hash)
-	count := 1
-	for {
-		if h.Parent == nil {
-			break
-		}
-		require.NotEqual(t, competingHead1.Hash, h.Hash)
-		require.NotEqual(t, competingHead2.Hash, h.Hash)
-		h = *h.Parent
-		count++
-	}
-	assert.Equal(t, 8, count)
-
-	// If we set the limit lower we get fewer heads in chain
-	h, err = store.Chain(context.TODO(), longestChainHeadHash, 2)
-	require.NoError(t, err)
-	assert.Equal(t, longestChainHeadHash, h.Hash)
-	count = 1
-	for {
-		if h.Parent == nil {
-			break
-		}
-		h = *h.Parent
-		count++
-	}
-	assert.Equal(t, 2, count)
-
-	// If we query for the top of the competing chain we get its parents
-	head, err := store.Chain(context.TODO(), competingHead2.Hash, 12)
-	require.NoError(t, err)
-	assert.Equal(t, competingHead2.Hash, head.Hash)
-	require.NotNil(t, head.Parent)
-	assert.Equal(t, competingHead1.Hash, head.Parent.Hash)
-	require.NotNil(t, head.Parent.Parent)
-	assert.Equal(t, baseOfForkHash, head.Parent.Parent.Hash)
-	assert.NotNil(t, head.Parent.Parent.Parent) // etc...
-
-	// Returns error if hash has no matches
-	_, err = store.Chain(context.TODO(), cltest.NewHash(), 12)
-	require.Error(t, err)
-
-	t.Run("depth of 0 returns error", func(t *testing.T) {
-		_, err = store.Chain(context.TODO(), longestChainHeadHash, 0)
-		require.EqualError(t, err, "record not found")
-	})
-}
-
-func TestORM_Heads_IdempotentInsertHead(t *testing.T) {
-	t.Parallel()
-
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
-
-	// Returns nil when inserting first head
-	head := *cltest.Head(0)
-	require.NoError(t, store.IdempotentInsertHead(context.TODO(), head))
-
-	// Head is inserted
-	foundHead, err := store.LastHead(context.TODO())
-	require.NoError(t, err)
-	assert.Equal(t, head.Hash, foundHead.Hash)
-
-	// Returns nil when inserting same head again
-	require.NoError(t, store.IdempotentInsertHead(context.TODO(), head))
-
-	// Head is still inserted
-	foundHead, err = store.LastHead(context.TODO())
-	require.NoError(t, err)
-	assert.Equal(t, head.Hash, foundHead.Hash)
-}
-
 func TestORM_EthTaskRunTx(t *testing.T) {
 	t.Parallel()
 
 	// NOTE: Must sidestep transactional tests since we rely on transaction
 	// rollback due to constraint violation for this function
-	tc, orm, cleanup := cltest.BootstrapThrowawayORM(t, "eth_task_run_transactions", true, true)
+	tc, orm, cleanup := heavyweight.FullTestORM(t, "eth_task_run_transactions", true, true)
 	defer cleanup()
 	store, cleanup := cltest.NewStoreWithConfig(t, tc)
 	store.ORM = orm
 	defer cleanup()
-	_, fromAddress := cltest.MustAddRandomKeyToKeystore(t, store)
+	ethKeyStore := cltest.NewKeyStore(t, store.DB).Eth()
+	_, fromAddress := cltest.MustAddRandomKeyToKeystore(t, ethKeyStore)
 
 	sharedTaskRunID, _ := cltest.MustInsertTaskRun(t, store)
 
@@ -1636,7 +1445,7 @@ func TestORM_EthTaskRunTx(t *testing.T) {
 		assert.Equal(t, toAddress, etrt.EthTx.ToAddress)
 		assert.Equal(t, encodedPayload, etrt.EthTx.EncodedPayload)
 		assert.Equal(t, gasLimit, etrt.EthTx.GasLimit)
-		assert.Equal(t, models.EthTxUnstarted, etrt.EthTx.State)
+		assert.Equal(t, bulletprooftxmanager.EthTxUnstarted, etrt.EthTx.State)
 
 		// Do it again to test idempotence
 		err = store.IdempotentInsertEthTaskRunTx(models.EthTxMeta{TaskRunID: sharedTaskRunID}, fromAddress, toAddress, encodedPayload, gasLimit)
@@ -1682,6 +1491,17 @@ func TestORM_EthTaskRunTx(t *testing.T) {
 
 		// But the second insert did not change the gas limit
 		assert.Equal(t, firstGasLimit, etrt.EthTx.GasLimit)
+	})
+
+	t.Run("returns error if fromAddress does not correspond to a key", func(t *testing.T) {
+		taskRunID, _ := cltest.MustInsertTaskRun(t, store)
+		toAddress := cltest.NewAddress()
+		encodedPayload := []byte{0, 1, 2}
+		gasLimit := uint64(42)
+
+		err := store.IdempotentInsertEthTaskRunTx(models.EthTxMeta{TaskRunID: taskRunID}, cltest.NewAddress(), toAddress, encodedPayload, gasLimit)
+		assert.Error(t, err)
+		assert.EqualError(t, err, "ERROR: insert or update on table \"eth_txes\" violates foreign key constraint \"eth_txes_from_address_fkey\" (SQLSTATE 23503)")
 	})
 }
 
@@ -1916,61 +1736,6 @@ func TestORM_UpdateFluxMonitorRoundStats(t *testing.T) {
 		require.True(t, fmrs.JobRunID.Valid)
 		require.Equal(t, jobRun.ID, fmrs.JobRunID.UUID)
 	}
-}
-
-func TestORM_GetRoundRobinAddress(t *testing.T) {
-	t.Parallel()
-	store, cleanup := cltest.NewStore(t)
-	defer cleanup()
-
-	cltest.MustAddRandomKeyToKeystore(t, store, 0, true)
-	_, k0Address := cltest.MustAddRandomKeyToKeystore(t, store, 0)
-	k1, _ := cltest.MustAddRandomKeyToKeystore(t, store, 0)
-	k2, _ := cltest.MustAddRandomKeyToKeystore(t, store, 0)
-
-	t.Run("with no address filter, rotates between all addresses", func(t *testing.T) {
-		address, err := store.GetRoundRobinAddress(store.DB)
-		require.NoError(t, err)
-		assert.Equal(t, k0Address.Hex(), address.Hex())
-
-		address, err = store.GetRoundRobinAddress(store.DB)
-		require.NoError(t, err)
-		assert.Equal(t, k1.Address.Hex(), address.Hex())
-
-		address, err = store.GetRoundRobinAddress(store.DB)
-		require.NoError(t, err)
-		assert.Equal(t, k2.Address.Hex(), address.Hex())
-
-		address, err = store.GetRoundRobinAddress(store.DB)
-		require.NoError(t, err)
-		assert.Equal(t, k0Address.Hex(), address.Hex())
-	})
-
-	t.Run("with address filter, rotates between given addresses", func(t *testing.T) {
-		addresses := []common.Address{k1.Address.Address(), k2.Address.Address()}
-
-		address, err := store.GetRoundRobinAddress(store.DB, addresses...)
-		require.NoError(t, err)
-		assert.Equal(t, k1.Address.Hex(), address.Hex())
-
-		address, err = store.GetRoundRobinAddress(store.DB, addresses...)
-		require.NoError(t, err)
-		assert.Equal(t, k2.Address.Hex(), address.Hex())
-
-		address, err = store.GetRoundRobinAddress(store.DB, addresses...)
-		require.NoError(t, err)
-		assert.Equal(t, k1.Address.Hex(), address.Hex())
-
-		address, err = store.GetRoundRobinAddress(store.DB, addresses...)
-		require.NoError(t, err)
-		assert.Equal(t, k2.Address.Hex(), address.Hex())
-	})
-
-	t.Run("with address filter when no address matches", func(t *testing.T) {
-		_, err := store.GetRoundRobinAddress(store.DB, []common.Address{cltest.NewAddress()}...)
-		require.Error(t, err)
-		require.Equal(t, "no keys available", err.Error())
-	})
 }
 
 func TestORM_SetConfigStrValue(t *testing.T) {

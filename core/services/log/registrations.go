@@ -1,12 +1,12 @@
 package log
 
 import (
-	"fmt"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers"
+	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/store/models"
 )
@@ -31,15 +31,14 @@ import (
 type (
 	registrations struct {
 		registrations map[common.Address]map[common.Hash]map[Listener]*listenerMetadata // contractAddress => logTopic => Listener
-		decoders      map[common.Address]AbigenContract
+		decoders      map[common.Address]ParseLogFunc
 
 		// highest 'NumConfirmations' per all listeners, used to decide about deleting older logs if it's higher than EthFinalityDepth
 		// it's: max(listeners.map(l => l.num_confirmations)
 		highestNumConfirmations uint64
 	}
 
-	// The Listener responds to log events through HandleLog, and contains setup/tear-down
-	// callbacks in the On* functions.
+	// The Listener responds to log events through HandleLog.
 	Listener interface {
 		HandleLog(b Broadcast)
 		JobID() models.JobID
@@ -49,29 +48,21 @@ type (
 
 	// metadata structure maintained per listener, used to avoid double-sends of logs
 	listenerMetadata struct {
-		opts                     ListenerOpts
-		filters                  [][]Topic
-		lowestAllowedBlockNumber uint64
-		lastSeenChain            *models.Head
-	}
-
-	// an update to listener metadata structure
-	listenerMetadataUpdate struct {
-		toUpdate                    *listenerMetadata
-		newLowestAllowedBlockNumber uint64
+		opts    ListenerOpts
+		filters [][]Topic
 	}
 )
 
 func newRegistrations() *registrations {
 	return &registrations{
 		registrations: make(map[common.Address]map[common.Hash]map[Listener]*listenerMetadata),
-		decoders:      make(map[common.Address]AbigenContract),
+		decoders:      make(map[common.Address]ParseLogFunc),
 	}
 }
 
 func (r *registrations) addSubscriber(reg registration) (needsResubscribe bool) {
-	addr := reg.opts.Contract.Address()
-	r.decoders[addr] = reg.opts.Contract
+	addr := reg.opts.Contract
+	r.decoders[addr] = reg.opts.ParseLog
 
 	if reg.opts.NumConfirmations <= 0 {
 		reg.opts.NumConfirmations = 1
@@ -81,20 +72,6 @@ func (r *registrations) addSubscriber(reg registration) (needsResubscribe bool) 
 		r.registrations[addr] = make(map[common.Hash]map[Listener]*listenerMetadata)
 	}
 
-	for _, log := range reg.opts.Logs {
-		topic := log.Topic()
-
-		if _, exists := r.registrations[addr][topic]; !exists {
-			r.registrations[addr][topic] = make(map[Listener]*listenerMetadata)
-			needsResubscribe = true
-		}
-
-		r.registrations[addr][topic][reg.listener] = &listenerMetadata{
-			opts:                     reg.opts,
-			lowestAllowedBlockNumber: uint64(0),
-		}
-	}
-
 	for topic, topicValueFilters := range reg.opts.LogsWithTopics {
 		if _, exists := r.registrations[addr][topic]; !exists {
 			r.registrations[addr][topic] = make(map[Listener]*listenerMetadata)
@@ -102,9 +79,8 @@ func (r *registrations) addSubscriber(reg registration) (needsResubscribe bool) 
 		}
 
 		r.registrations[addr][topic][reg.listener] = &listenerMetadata{
-			opts:                     reg.opts,
-			filters:                  topicValueFilters,
-			lowestAllowedBlockNumber: uint64(0),
+			opts:    reg.opts,
+			filters: topicValueFilters,
 		}
 	}
 
@@ -113,14 +89,12 @@ func (r *registrations) addSubscriber(reg registration) (needsResubscribe bool) 
 }
 
 func (r *registrations) removeSubscriber(reg registration) (needsResubscribe bool) {
-	addr := reg.opts.Contract.Address()
+	addr := reg.opts.Contract
 
 	if _, exists := r.registrations[addr]; !exists {
 		return
 	}
-	for _, logType := range reg.opts.Logs {
-		topic := logType.Topic()
-
+	for topic := range reg.opts.LogsWithTopics {
 		if _, exists := r.registrations[addr][topic]; !exists {
 			continue
 		}
@@ -180,12 +154,16 @@ func (r *registrations) isAddressRegistered(address common.Address) bool {
 	return exists
 }
 
-func (r *registrations) sendLogs(logs []types.Log, orm ORM, latestHead models.Head) {
-	updates := make([]listenerMetadataUpdate, 0)
-	for _, log := range logs {
-		r.sendLog(log, orm, latestHead, &updates)
+func (r *registrations) sendLogs(logs []types.Log, latestHead models.Head, broadcasts []LogBroadcast) {
+	broadcastsExisting := make(map[LogBroadcastAsKey]struct{})
+	for _, b := range broadcasts {
+
+		broadcastsExisting[b.AsKey()] = struct{}{}
 	}
-	applyListenerInfoUpdates(updates, latestHead)
+
+	for _, log := range logs {
+		r.sendLog(log, latestHead, broadcastsExisting)
+	}
 }
 
 // Returns true if there is at least one filter value (or no filters) that matches an actual received value for every index i, or false otherwise
@@ -206,7 +184,7 @@ func filtersContainValues(topicValues []common.Hash, filters [][]Topic) bool {
 	return true
 }
 
-func (r *registrations) sendLog(log types.Log, orm ORM, latestHead models.Head, updates *[]listenerMetadataUpdate) {
+func (r *registrations) sendLog(log types.Log, latestHead models.Head, broadcasts map[LogBroadcastAsKey]struct{}) {
 	latestBlockNumber := uint64(latestHead.Number)
 	var wg sync.WaitGroup
 	for listener, metadata := range r.registrations[log.Address][log.Topics[0]] {
@@ -226,9 +204,9 @@ func (r *registrations) sendLog(log types.Log, orm ORM, latestHead models.Head, 
 			continue
 		}
 
-		// All logs for blocks below lowestAllowedBlockNumber were already sent to this listener, so we skip them
-		if log.BlockNumber < metadata.lowestAllowedBlockNumber && metadata.lastSeenChain != nil && metadata.lastSeenChain.IsInChain(log.BlockHash) {
-			// Skipping send because the log height is below lowest unprocessed in the currently remembered chain
+		currentBroadcast := NewLogBroadcastAsKey(log, listener)
+		_, exists := broadcasts[currentBroadcast]
+		if exists {
 			continue
 		}
 
@@ -239,17 +217,16 @@ func (r *registrations) sendLog(log types.Log, orm ORM, latestHead models.Head, 
 			}
 		}
 
-		// Make sure that this log is not sent again on the next head by increasing the newLowestAllowedBlockNumber
-		*updates = append(*updates, listenerMetadataUpdate{
-			toUpdate:                    metadata,
-			newLowestAllowedBlockNumber: log.BlockNumber + 1,
-		})
-
 		logCopy := gethwrappers.CopyLog(log)
-		decodedLog, err := r.decoders[log.Address].ParseLog(logCopy)
-		if err != nil {
-			logger.Errorw("Could not parse contract log", "error", err)
-			continue
+
+		var decodedLog generated.AbigenLog
+		var err error
+		if parseLog := r.decoders[log.Address]; parseLog != nil {
+			decodedLog, err = parseLog(logCopy)
+			if err != nil {
+				logger.Errorw("Could not parse contract log", "error", err)
+				continue
+			}
 		}
 
 		wg.Add(1)
@@ -260,39 +237,9 @@ func (r *registrations) sendLog(log types.Log, orm ORM, latestHead models.Head, 
 				latestBlockHash:   latestHead.Hash,
 				rawLog:            logCopy,
 				decodedLog:        decodedLog,
-				jobID:             listener.JobID(),
-				jobIDV2:           listener.JobIDV2(),
-				isV2:              listener.IsV2Job(),
+				jobID:             NewJobIdFromListener(listener),
 			})
 		}()
 	}
 	wg.Wait()
-}
-
-//	After processing the logs in this batch, the listenerMetadata structures that we touched, are updated
-//  with new information about the canonical chain and the lowestAllowedBlockNumber value (higher every time) that is used to guard against double-sends
-//  Note that the updates are applied only after all the logs for the (latest height - num_confirmations) head height were sent.
-func applyListenerInfoUpdates(updates []listenerMetadataUpdate, latestHead models.Head) {
-	for _, update := range updates {
-		if update.toUpdate.lastSeenChain == nil || latestHead.IsInChain(update.toUpdate.lastSeenChain.Hash) {
-			if update.toUpdate.lowestAllowedBlockNumber < update.newLowestAllowedBlockNumber {
-				update.toUpdate.lowestAllowedBlockNumber = update.newLowestAllowedBlockNumber
-			}
-		} else {
-
-			logger.Debugw("LogBroadcaster: Chain reorg - resetting lowestAllowedBlockNumber",
-				"blockNumber", latestHead.Number,
-				"blockHash", latestHead.Hash,
-				"lastSeenChainNumber", update.toUpdate.lastSeenChain.Number,
-				"lastSeenChainHash", update.toUpdate.lastSeenChain.Hash,
-				"chainLength", fmt.Sprintf("%v", latestHead.ChainLength()),
-				"chainHashes", fmt.Sprintf("%v", latestHead.ChainHashes()),
-			)
-
-			// Re-org situation: the chain was changed, so we can't use the number that tracked last unprocessed height of the previous chain
-			update.toUpdate.lowestAllowedBlockNumber = 0
-		}
-		// Setting as latest head for this listener
-		update.toUpdate.lastSeenChain = &latestHead
-	}
 }

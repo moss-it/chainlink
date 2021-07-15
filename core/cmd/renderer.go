@@ -110,8 +110,8 @@ func (rt RendererTable) renderVRFKeys(keys []VRFKeyPresenter) error {
 			key.Compressed,
 			key.Uncompressed,
 			key.Hash,
-			key.FriendlyCreatedAt(),
-			key.FriendlyUpdatedAt(),
+			key.CreatedAt.String(),
+			key.UpdatedAt.String(),
 			key.FriendlyDeletedAt(),
 		})
 	}
@@ -348,8 +348,8 @@ func (rt RendererTable) renderPipelineRun(run pipeline.Run) error {
 	table := rt.newTable([]string{"ID", "Created At", "Finished At"})
 
 	var finishedAt string
-	if run.FinishedAt != nil {
-		finishedAt = run.FinishedAt.String()
+	if run.FinishedAt.Valid {
+		finishedAt = run.FinishedAt.Time.String()
 	}
 
 	row := []string{

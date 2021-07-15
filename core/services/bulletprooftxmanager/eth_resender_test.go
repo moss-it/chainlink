@@ -11,7 +11,6 @@ import (
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/mocks"
 	"github.com/smartcontractkit/chainlink/core/services/bulletprooftxmanager"
-	"github.com/smartcontractkit/chainlink/core/store/models"
 	"github.com/smartcontractkit/chainlink/core/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -29,12 +28,12 @@ func Test_EthResender_FindEthTxesRequiringResend(t *testing.T) {
 
 	t.Run("returns nothing if there are no transactions", func(t *testing.T) {
 		olderThan := time.Now()
-		attempts, err := bulletprooftxmanager.FindEthTxesRequiringResend(store.DB, olderThan)
+		attempts, err := bulletprooftxmanager.FindEthTxesRequiringResend(store.DB, olderThan, 10)
 		require.NoError(t, err)
 		assert.Len(t, attempts, 0)
 	})
 
-	etxs := []models.EthTx{
+	etxs := []bulletprooftxmanager.EthTx{
 		cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, store, 0, fromAddress, time.Unix(1616509100, 0)),
 		cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, store, 1, fromAddress, time.Unix(1616509200, 0)),
 		cltest.MustInsertUnconfirmedEthTxWithBroadcastAttempt(t, store, 2, fromAddress, time.Unix(1616509300, 0)),
@@ -49,11 +48,19 @@ func Test_EthResender_FindEthTxesRequiringResend(t *testing.T) {
 
 	t.Run("returns the highest price attempt for each transaction that was last broadcast before or on the given time", func(t *testing.T) {
 		olderThan := time.Unix(1616509200, 0)
-		attempts, err := bulletprooftxmanager.FindEthTxesRequiringResend(store.DB, olderThan)
+		attempts, err := bulletprooftxmanager.FindEthTxesRequiringResend(store.DB, olderThan, 0)
 		require.NoError(t, err)
 		assert.Len(t, attempts, 2)
 		assert.Equal(t, attempt1_2.ID, attempts[0].ID)
 		assert.Equal(t, etxs[1].EthTxAttempts[0].ID, attempts[1].ID)
+	})
+
+	t.Run("applies limit", func(t *testing.T) {
+		olderThan := time.Unix(1616509200, 0)
+		attempts, err := bulletprooftxmanager.FindEthTxesRequiringResend(store.DB, olderThan, 1)
+		require.NoError(t, err)
+		assert.Len(t, attempts, 1)
+		assert.Equal(t, attempt1_2.ID, attempts[0].ID)
 	})
 }
 

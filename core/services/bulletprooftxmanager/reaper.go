@@ -7,7 +7,8 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/smartcontractkit/chainlink/core/logger"
-	"github.com/smartcontractkit/chainlink/core/store/orm"
+	"github.com/smartcontractkit/chainlink/core/services/postgres"
+	"github.com/smartcontractkit/chainlink/core/store/models"
 	"gorm.io/gorm"
 )
 
@@ -46,13 +47,13 @@ func NewReaper(db *gorm.DB, config ReaperConfig) *Reaper {
 
 // Start the reaper. Should only be called once.
 func (r *Reaper) Start() {
-	r.log.Debugf("EthTxReaper: started with age threshold %v and interval %v", r.config.EthTxReaperThreshold(), r.config.EthTxReaperInterval())
+	r.log.Debugf("BPTXMReaper: started with age threshold %v and interval %v", r.config.EthTxReaperThreshold(), r.config.EthTxReaperInterval())
 	go r.runLoop()
 }
 
 // Stop the reaper. Should only be called once.
 func (r *Reaper) Stop() {
-	r.log.Debug("EthTxReaper: stopping")
+	r.log.Debug("BPTXMReaper: stopping")
 	close(r.chStop)
 	<-r.chDone
 }
@@ -80,7 +81,11 @@ func (r *Reaper) work() {
 	}
 	err := r.ReapEthTxes(latestBlockNum)
 	if err != nil {
-		r.log.Error("Reaper: unable to reap old eth_txes: ", err)
+		r.log.Error("BPTXMReaper: unable to reap old eth_txes: ", err)
+	}
+	err = r.ReapJobRuns()
+	if err != nil {
+		r.log.Error("BPTXMReaper: unable to reap old runs: ", err)
 	}
 }
 
@@ -100,19 +105,19 @@ func (r *Reaper) SetLatestBlockNum(latestBlockNum int64) {
 func (r *Reaper) ReapEthTxes(headNum int64) error {
 	threshold := r.config.EthTxReaperThreshold()
 	if threshold == 0 {
-		r.log.Debug("Reaper: ETH_TX_REAPER_THRESHOLD set to 0; skipping reapEthTxes")
+		r.log.Debug("BPTXMReaper: ETH_TX_REAPER_THRESHOLD set to 0; skipping ReapEthTxes")
 		return nil
 	}
 	minBlockNumberToKeep := headNum - int64(r.config.EthFinalityDepth())
 	mark := time.Now()
 	timeThreshold := mark.Add(-threshold)
 
-	r.log.Debugw(fmt.Sprintf("Reaper: reaping old eth_txes created before %s", timeThreshold.Format(time.RFC3339)), "ageThreshold", threshold, "timeThreshold", timeThreshold, "minBlockNumberToKeep", minBlockNumberToKeep)
+	r.log.Debugw(fmt.Sprintf("BPTXMReaper: reaping old eth_txes created before %s", timeThreshold.Format(time.RFC3339)), "ageThreshold", threshold, "timeThreshold", timeThreshold, "minBlockNumberToKeep", minBlockNumberToKeep)
 
 	// Delete old confirmed eth_txes
 	// NOTE that this relies on foreign key triggers automatically removing
 	// the eth_tx_attempts and eth_receipts linked to every eth_tx
-	err := orm.Batch(func(_, limit uint) (count uint, err error) {
+	err := postgres.Batch(func(_, limit uint) (count uint, err error) {
 		res := r.db.Exec(`
 WITH old_enough_receipts AS (
 	SELECT tx_hash FROM eth_receipts
@@ -132,10 +137,10 @@ AND eth_txes.state = 'confirmed'`, minBlockNumberToKeep, limit, timeThreshold)
 		return uint(res.RowsAffected), res.Error
 	})
 	if err != nil {
-		return errors.Wrap(err, "Reaper#reapEthTxes batch delete of confirmed eth_txes failed")
+		return errors.Wrap(err, "BPTXMReaper#reapEthTxes batch delete of confirmed eth_txes failed")
 	}
 	// Delete old 'fatal_error' eth_txes
-	err = orm.Batch(func(_, limit uint) (count uint, err error) {
+	err = postgres.Batch(func(_, limit uint) (count uint, err error) {
 		res := r.db.Exec(`
 DELETE FROM eth_txes
 WHERE created_at < ?
@@ -146,10 +151,30 @@ AND state = 'fatal_error'`, timeThreshold)
 		return uint(res.RowsAffected), res.Error
 	})
 	if err != nil {
-		return errors.Wrap(err, "Reaper#reapEthTxes batch delete of fatally errored eth_txes failed")
+		return errors.Wrap(err, "BPTXMReaper#reapEthTxes batch delete of fatally errored eth_txes failed")
 	}
 
-	r.log.Debugf("Reaper: completed in %v", time.Since(mark))
+	r.log.Debugf("BPTXMReaper: ReapEthTxes completed in %v", time.Since(mark))
 
 	return nil
+}
+
+// ReapJobRuns removes old job runs
+// HACK: This isn't quite the right place for it, but since we are killing the
+// old pipeline this code is temporary anyway
+func (r *Reaper) ReapJobRuns() error {
+	threshold := r.config.EthTxReaperThreshold() // Just re-use the EthTxReaperThreshold, it's probably close enough
+	if threshold == 0 {
+		r.log.Debug("BPTXMReaper: ETH_TX_REAPER_THRESHOLD set to 0; skipping ReapJobRuns")
+		return nil
+	}
+	mark := time.Now()
+	timeThreshold := mark.Add(-threshold)
+	r.log.Debugw(fmt.Sprintf("BPTXMReaper: reaping old job_runs last updated before %s", timeThreshold.Format(time.RFC3339)), "ageThreshold", threshold, "timeThreshold", timeThreshold)
+	request := &models.BulkDeleteRunRequest{
+		Status:        []models.RunStatus{models.RunStatusCompleted, models.RunStatusErrored},
+		UpdatedBefore: timeThreshold,
+	}
+	r.log.Debugf("BPTXMReaper: ReapJobRuns completed in %v", time.Since(mark))
+	return errors.Wrap(postgres.BulkDeleteRuns(r.db, request), "BPTXMReaper#ReapJobRuns failed")
 }
